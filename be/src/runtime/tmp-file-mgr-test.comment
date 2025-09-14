@@ -1,0 +1,93 @@
+
+/// Regression test for IMPALA-2160. Verify that temporary file manager allocates blocks
+/// at the expected file offsets.
+TEST_F(TmpFileMgrTest, TestFileAllocation) {
+  TmpFileMgr tmp_file_mgr;
+  ASSERT_OK(tmp_file_mgr.Init(metrics_.get()));
+  TUniqueId id;
+  TmpFileGroup file_group(
+      &tmp_file_mgr, io_mgr(), profile_, id, 1024 * 1024 * 8);
+
+  // Default configuration should give us one temporary device.
+  EXPECT_EQ(1, tmp_file_mgr.NumActiveTmpDevices());
+  vector<TmpFileMgr::DeviceId> tmp_devices = tmp_file_mgr.ActiveTmpDevices();
+  EXPECT_EQ(1, tmp_devices.size());
+  vector<TmpFile*> files;
+  ASSERT_OK(CreateFiles(&file_group, &files));
+  EXPECT_EQ(1, files.size());
+  TmpFile* file = files[0];
+  // Apply writes of variable sizes and check space was allocated correctly.
+  int64_t write_sizes[] = {1, 10, 1024, 4, 1024 * 1024 * 8, 1024 * 1024 * 8, 16, 10};
+  int num_write_sizes = sizeof(write_sizes) / sizeof(write_sizes[0]);
+  int64_t next_offset = 0;
+  for (int i = 0; i < num_write_sizes; ++i) {
+    int64_t offset;
+    FileAllocateSpace(file, write_sizes[i], &offset);
+    EXPECT_EQ(next_offset, offset);
+    next_offset = offset + write_sizes[i];
+  }
+  // Check that cleanup is correct.
+  string file_path = file->path();
+  EXPECT_FALSE(boost::filesystem::exists(file_path));
+
+  // Check that the file is cleaned up correctly. Need to create file first since
+  // tmp file is only allocated on writes.
+  EXPECT_OK(FileSystemUtil::CreateFile(file->path()));
+  file_group.Close();
+  EXPECT_FALSE(boost::filesystem::exists(file_path));
+  CheckMetrics(&tmp_file_mgr);
+}
+好的，这段代码是一个 Impala 的回归测试（Regression Test），用于验证 TmpFileMgr（临时文件管理器）是否按照预期在文件系统中分配临时文件的块。它针对的是一个特定的 Bug ID：IMPALA-2160。
+
+这个测试用例通过模拟一系列不同大小的写入操作，来检查 TmpFileMgr 是否正确地计算和分配了文件偏移量。
+
+情节与代码解释
+想象一下，你正在测试一个智能的“文件存储管家”，它的职责是为你管理一些临时文件，这些文件可能分散在不同的磁盘上。这个管家非常聪明，它会帮你决定把数据放在哪里，并且确保你请求的每一块数据都有一个正确的位置。
+这个测试就是为了验证这个管家是否真的那么聪明，尤其是在它决定把数据放在文件的哪个“偏移量”（从文件开头算起的距离）上。
+
+4. 清理检查 (EXPECT_FALSE)
+string file_path = file->path();: 获取临时文件的实际路径。
+
+EXPECT_FALSE(boost::filesystem::exists(file_path));:
+
+注意： 在 FileAllocateSpace 阶段，文件可能还没有被实际创建在文件系统上。Impala 的 TmpFileMgr 倾向于延迟创建文件，直到真正有数据写入时。所以，这里检查文件不存在是符合预期的。
+
+EXPECT_OK(FileSystemUtil::CreateFile(file->path()));:
+
+为了测试 file_group.Close() 的清理功能，我们手动创建这个文件，确保它存在于文件系统上。
+
+file_group.Close();: 调用 TmpFileGroup 的 Close() 方法。这个方法应该负责删除该文件组创建的所有临时文件。
+
+EXPECT_FALSE(boost::filesystem::exists(file_path));: 再次检查！ 确认 Close() 方法成功删除了文件，文件现在应该不存在了。
+
+CheckMetrics(&tmp_file_mgr);: 另一个辅助函数，用于检查 TmpFileMgr 内部的各种度量指标（如已用空间计数器等）是否在分配和清理后保持正确。
+******************************************88
+TEST_F(TmpFileMgrTest, TestAllocateNonWritable) {
+  vector<string> tmp_dirs;
+  vector<string> scratch_subdirs;
+  for (int i = 0; i < 2; ++i) {
+    tmp_dirs.push_back(Substitute("/tmp/tmp-file-mgr-test.$0", i));
+    scratch_subdirs.push_back(tmp_dirs[i] + "/impala-scratch");
+  }
+  RemoveAndCreateDirs(tmp_dirs);
+  TmpFileMgr tmp_file_mgr;
+  ASSERT_OK(tmp_file_mgr.InitCustom(tmp_dirs, false, "", false, metrics_.get()));
+  TUniqueId id;
+  TmpFileGroup file_group(&tmp_file_mgr, io_mgr(), profile_, id);
+
+  vector<TmpFile*> allocated_files;
+  ASSERT_OK(CreateFiles(&file_group, &allocated_files));
+  int64_t offset;
+  FileAllocateSpace(allocated_files[0], 1, &offset);
+
+  // Make scratch non-writable and test allocation at different stages:
+  // new file creation, files with no allocated blocks. files with allocated space.
+  // No errors should be encountered during allocation since allocation is purely logical.
+  chmod(scratch_subdirs[0].c_str(), 0);
+  FileAllocateSpace(allocated_files[0], 1, &offset);
+  FileAllocateSpace(allocated_files[1], 1, &offset);
+
+  chmod(scratch_subdirs[0].c_str(), S_IRWXU);
+  ASSERT_OK(FileSystemUtil::RemovePaths(tmp_dirs));
+  file_group.Close();
+}

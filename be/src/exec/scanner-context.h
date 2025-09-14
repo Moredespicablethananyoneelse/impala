@@ -368,7 +368,7 @@ class ScannerContext {
   /// invalid to reference. Callers which want to clear the streams from the context
   /// should also call ClearStreams().
   ///
-  /// This must be called with 'done' set when the scanner is complete and no longer needs
+  /// This must be alled with 'done' set when the scanner is complete and no longer needs
   /// any resources. After calling with 'done' set, this should be called again if new
   /// streams are created via AddStream().
   void ReleaseCompletedResources(bool done);

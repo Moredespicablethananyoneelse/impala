@@ -1,0 +1,254 @@
+-----
+
+理解 `DiskInfo::GetDeviceNames` 函数需要一些背景知识，主要是关于 **Linux 操作系统如何管理和表示磁盘设备**，以及 Impala 为什么要获取这些信息。
+
+-----
+
+### 背景知识
+
+1.  **Linux 中的磁盘设备表示**
+
+      * 在 Linux 系统中，所有的硬件设备都被抽象成文件。磁盘设备也不例外。
+      * **`/dev/` 目录：** 你会在 `/dev/` 目录下看到类似 `sda`, `sdb`, `nvme0n1` 这样的文件，它们代表着物理磁盘设备。而 `sda1`, `sdb2`, `nvme0n1p1` 则代表这些物理磁盘上的**分区**。
+      * **主/次设备号 (Major/Minor Device Numbers)：** Linux 内核使用一对数字来唯一标识每个设备：
+          * **主设备号 (Major Number)：** 表示设备类型（例如，所有块设备可能共享同一个主设备号）。
+          * **次设备号 (Minor Number)：** 表示同一类型设备中的具体实例（例如，`sda` 和 `sdb` 的主设备号可能相同，但次设备号不同）。
+          * 这两个数字组合在一起形成一个唯一的 `dev_t` 类型，用于在内核内部识别设备。
+      * **`/proc/partitions` 文件：** 这是一个虚拟文件，由 Linux 内核动态生成。它列出了系统中所有被内核识别的块设备分区，以及它们的主设备号、次设备号和总块数。
+          * 例如，你可能会看到这样的内容：
+            ```
+            major minor  #blocks  name
+               8     0   500107600 sda
+               8     1    1048576 sda1
+               8     2   499057152 sda2
+             259     0   200000000 nvme0n1
+             259     1   100000000 nvme0n1p1
+            ```
+          * 从这个文件中，程序可以得知有哪些磁盘和分区，以及它们对应的设备号和名称。
+      * **`/sys/block/` 目录：** 这是 Linux `sysfs` 文件系统的一部分，提供了更详细的硬件信息。对于每个块设备，`/sys/block/` 下都会有一个以设备名命名的子目录（例如 `/sys/block/sda`）。
+          * 在这个子目录下，通常会有 `queue/rotational` 文件。这个文件指示了该设备是否是旋转的：
+              * `0`：表示非旋转设备 (Solid State Drive, **SSD**)。
+              * `1`：表示旋转设备 (Hard Disk Drive, **HDD**)。
+          * Impala 需要这个信息来判断磁盘是机械硬盘还是固态硬盘，因为它们的性能特征（特别是随机读写）差异巨大，这对 I/O 调度和优化至关重要。
+
+2.  **Impala 为什么需要磁盘信息？**
+
+      * Impala 是一个分布式分析型数据库，它需要处理大量的数据 I/O。为了高效地执行查询，它必须对底层存储系统有深入的了解。
+      * **I/O 调度和优先级：** Impala 内部有自己的 I/O 调度器。它会根据查询的类型、优先级以及磁盘的物理特性来决定如何安排读写请求。
+      * **优化随机 vs. 顺序 I/O：**
+          * **HDD (机械硬盘)：** 擅长顺序读写，随机读写性能很差。Impala 倾向于在 HDD 上将多个小的随机读请求合并成大的顺序读请求，以提高效率。
+          * **SSD (固态硬盘)：** 随机读写性能非常好，寻道时间几乎为零。Impala 可以更自由地在 SSD 上执行随机读写，甚至同时处理多个并发的随机请求。
+      * **防止性能瓶颈：** 如果 Impala 不知道磁盘的类型，它可能会对 SSD 进行不必要的顺序优化，或者在 HDD 上执行大量随机读写，导致严重的性能下降。
+      * **负载均衡：** 了解每个磁盘的存在和类型，有助于 Impala 更智能地将数据和 I/O 负载分散到不同的磁盘上，避免单个磁盘成为瓶颈。
+
+3.  **NVMe 设备的特殊命名**
+
+      * NVMe (Non-Volatile Memory Express) 是一种为 SSD 设计的高性能接口。NVMe 设备的命名规则与传统的 SATA/SAS 硬盘（如 `sda`, `sdb`）不同。
+      * NVMe 设备通常命名为 `nvme{device_id}n{namespace_id}`，例如 `nvme0n1`。
+      * 其分区则可能命名为 `nvme0n1p1`, `nvme0n1p2`。
+      * `DiskInfo` 类需要特殊处理这种命名，以便正确地将分区映射到其所属的顶级 NVMe 设备。
+
+-----
+
+### `DiskInfo::GetDeviceNames` 的作用
+
+有了这些背景知识，你就可以理解 `DiskInfo::GetDeviceNames` 的核心作用了：
+
+它是一个**系统探测器**，通过读取 Linux 内核提供的 `/proc/partitions` 和 `/sys/block/*/queue/rotational` 等文件，来：
+
+1.  **识别所有物理磁盘设备**（例如 `sda`, `sdb`, `nvme0n1`），过滤掉仅仅是分区的条目。
+2.  为每个物理磁盘分配一个 Impala 内部使用的 **0-based 唯一 ID**（`disk_id`）。
+3.  建立**设备文件路径与内部 `disk_id` 的映射**（通过 `dev_t`）。
+4.  **判断每个磁盘是旋转设备（HDD）还是非旋转设备（SSD）**，这是其最关键的功能之一。
+
+所有这些收集到的信息都存储在 `DiskInfo` 的静态成员变量中，供 Impala 的 I/O 调度器在运行时查询和使用，从而做出更优的 I/O 决策。
+*****************************************************************
+好的，`DiskInfo::GetDeviceNames` 函数是 `DiskInfo` 类中一个核心的私有静态方法。它的主要作用是**探测系统中的物理磁盘设备，并收集它们的信息**，例如设备名称（如 `sda`）、是否为旋转磁盘（HDD）以及其对应的设备 ID。这些信息是 Impala 用于进行磁盘 I/O 调度和优化的基础。
+
+让我们深入分析这个函数的实现：
+
+-----
+
+### `DiskInfo::GetDeviceNames` 函数解释
+
+```cpp
+void DiskInfo::GetDeviceNames(const std::string &proc, const std::string &sys) {
+  // 清空之前存储的磁盘信息，准备重新收集
+  disks_.clear();
+  device_id_to_disk_id_.clear();
+  disk_name_to_disk_id_.clear();
+
+  // 格式：
+  //    major, minor, #blocks, name
+  // 我们只对 'name' 感兴趣，它的格式是 device_name<partition #> (设备名<分区号>)
+  // 同一个设备会因为有多个分区而多次出现 (例如 sda1, sda2)。
+  ifstream partitions(Substitute("$0/partitions", proc), ios::in); // 打开 /proc/partitions 文件
+  while (partitions.good() && !partitions.eof()) { // 循环读取文件直到结束或遇到错误
+    string line;
+    getline(partitions, line); // 读取一行
+    trim(line); // 移除行首尾空格
+
+    vector<string> fields;
+    // 按空格分割行，并压缩连续的空格（视为一个分隔符）
+    split(fields, line, is_any_of(" "), token_compress_on);
+    if (fields.size() != 4) continue; // 如果分割后的字段数量不是4，则跳过此行
+    const string& partition_name = fields[3]; // 第4个字段是分区名称
+    if (partition_name == "name") continue; // 跳过标题行 "name"
+
+    // 检查这是否是顶级块设备。如果不是，尝试猜测顶级块设备的名称。
+    bool found_device = false;
+    string dev_name = partition_name; // 初始设备名为分区名
+    Status status = FileSystemUtil::PathExists( // 检查 /sys/block/<dev_name> 路径是否存在
+      Substitute("$0/block/$1", sys, dev_name), &found_device);
+    if (!status.ok()) LOG(WARNING) << status.GetDetail(); // 如果检查路径失败，记录警告
+    if (!found_device) {
+      // NVME 设备有特殊格式。尝试检测它，如果不是 NVME 设备，则回退到常规方法。
+      std::string nvme_basename;
+      if (TryNVMETrim(dev_name, &nvme_basename)) { // 尝试修剪 NVME 设备名
+        // 这是 NVME 设备，使用返回的基础名称
+        dev_name = nvme_basename;
+      } else {
+        // 不遵循 NVME 模式，因此使用常规磁盘设备的逻辑
+        // 从名称中移除分区号。例如 sda2 --> sda
+        trim_right_if(dev_name, is_any_of("0123456789"));
+      }
+    }
+
+    // 创建所有设备 ID（每个分区一个）到磁盘 ID 的映射。
+    int major_dev_id = atoi(fields[0].c_str()); // 主设备号
+    int minor_dev_id = atoi(fields[1].c_str()); // 次设备号
+    dev_t dev = makedev(major_dev_id, minor_dev_id); // 组合为主/次设备号，形成 dev_t
+    // 确保该 dev_t 尚未被映射，避免重复
+    DCHECK(device_id_to_disk_id_.find(dev) == device_id_to_disk_id_.end());
+
+    int disk_id = -1;
+    // 查找设备名是否已存在于 disk_name_to_disk_id_ 映射中
+    map<string, int>::iterator it = disk_name_to_disk_id_.find(dev_name);
+    if (it == disk_name_to_disk_id_.end()) {
+      // 第一次看到这个磁盘
+      disk_id = disks_.size(); // 分配新的磁盘 ID（当前磁盘列表的大小）
+      disks_.push_back(Disk(dev_name, disk_id)); // 将新磁盘添加到列表中
+      disk_name_to_disk_id_[dev_name] = disk_id; // 记录设备名到磁盘 ID 的映射
+    } else {
+      disk_id = it->second; // 如果已存在，则使用已有的磁盘 ID
+    }
+    device_id_to_disk_id_[dev] = disk_id; // 记录 dev_t 到磁盘 ID 的映射
+  }
+
+  if (partitions.is_open()) partitions.close(); // 关闭文件流
+
+  if (disks_.empty()) {
+    // 如果所有尝试都失败了，返回 1 (表示只有一个默认磁盘)
+    LOG(WARNING) << "Could not determine number of disks on this machine.";
+    disks_.push_back(Disk("sda", 0)); // 添加一个默认的 "sda" 磁盘
+    return;
+  }
+
+  // 确定磁盘是否为旋转磁盘（HDD）。
+  for (int i = 0; i < disks_.size(); ++i) {
+    // 我们可以通过读取 /sys/block/<device>/queue/rotational 来检查它是否为旋转磁盘。
+    // 如果文件缺失或数据异常，则默认为旋转磁盘。
+    std::string block_rot =
+      Substitute("$0/block/$1/queue/rotational", sys, disks_[i].name);
+    ifstream rotational(block_rot, ios::in); // 打开 /sys/.../rotational 文件
+    if (rotational.good()) {
+      string line;
+      getline(rotational, line); // 读取一行
+      if (line == "0") disks_[i].is_rotational = false; // 如果内容是 "0"，表示非旋转（SSD）
+    } else {
+      LOG(INFO) << "Could not read " << block_rot << " for " << disks_[i].name
+                << " , assuming rotational."; // 无法读取则默认认为是旋转磁盘
+    }
+    if (rotational.is_open()) rotational.close(); // 关闭文件流
+  }
+}
+```
+
+-----
+
+### 函数功能概览
+
+`GetDeviceNames` 函数旨在通过读取 Linux 系统文件 `/proc/partitions` 和 `/sys/block` 来识别系统中安装的所有物理磁盘设备（包括 HDD 和 SSD），并收集它们的基本属性。
+
+-----
+
+### 详细步骤与逻辑
+
+1.  **初始化和清空容器：**
+
+      * 函数开始时，会清空 `disks_`、`device_id_to_disk_id_` 和 `disk_name_to_disk_id_` 这三个静态成员变量。这确保了每次调用 `GetDeviceNames` 时，都是从一个干净的状态开始收集信息。
+
+2.  **解析 `/proc/partitions`：**
+
+      * 打开 `/proc/partitions` 文件。这个文件包含了系统中的所有块设备及其分区信息，每行一个记录，格式为 `major_dev_id minor_dev_id #blocks device_name`。
+      * 逐行读取文件内容。
+      * **行解析**：
+          * 使用 `boost::algorithm::split` 和 `boost::algorithm::trim` 来分割每行，提取出 `major` 设备号、`minor` 设备号和 `device_name`（这里通常是分区名，例如 `sda1`、`nvme0n1p1`）。
+          * 跳过格式不正确的行和标题行（`name`）。
+      * **设备名规范化**：
+          * 对于每个 `partition_name`（例如 `sda1`），它首先尝试在 `/sys/block/<partition_name>` 路径下查找其对应的块设备信息。
+          * **如果直接找到** (`found_device` 为 `true`)，说明 `partition_name` 本身就是顶级块设备名（例如 `sda`），或者 `/proc/partitions` 直接列出了顶级设备。
+          * **如果未直接找到** (`found_device` 为 `false`)：
+              * **NVMe 特殊处理**：调用 `TryNVMETrim` 函数。NVMe 设备的命名规则比较特殊（如 `nvme0n1p1`），它的顶级设备名是 `nvme0n1`。`TryNVMETrim` 使用正则表达式来识别并提取出这种 NVMe 设备的基名。
+              * **常规磁盘处理**：如果不是 NVMe 设备，则假定它是常规的带分区号的设备名（如 `sda1`），使用 `trim_right_if(dev_name, is_any_of("0123456789"))` 来移除末尾的数字，从而得到顶级设备名（如 `sda`）。
+
+3.  **构建设备 ID 到磁盘 ID 的映射：**
+
+      * 从 `/proc/partitions` 中解析出的 `major` 和 `minor` 设备号被用来构建一个 `dev_t`（设备 ID），这是 Linux 内核中用于唯一标识一个设备的类型。
+      * `DCHECK(device_id_to_disk_id_.find(dev) == device_id_to_disk_id_.end())`：确保每个 `dev_t` 只被处理一次，避免重复。
+      * **分配内部 `disk_id`：**
+          * 检查规范化后的 `dev_name` 是否已存在于 `disk_name_to_disk_id_` 映射中。
+          * **如果不存在**：说明这是第一次遇到这个物理磁盘。此时，为其分配一个新的、基于 0 的内部 `disk_id`（通常是 `disks_.size()`，即当前已知磁盘数量）。然后创建一个 `Disk` 结构体，将其添加到 `disks_` 向量中，并更新 `disk_name_to_disk_id_` 映射。
+          * **如果已存在**：说明这是同一个物理磁盘的不同分区，直接使用已有的 `disk_id`。
+      * 将解析出的 `dev_t` 和对应的内部 `disk_id` 存储在 `device_id_to_disk_id_` 映射中。
+
+4.  **处理无磁盘情况：**
+
+      * 在处理完 `/proc/partitions` 后，如果 `disks_` 向量仍然为空（即没有检测到任何磁盘），则会发出警告日志，并添加一个默认的 `Disk("sda", 0)`，以确保至少有一个磁盘信息存在，避免后续逻辑出现空指针或索引越界问题。
+
+5.  **判断磁盘类型（旋转或非旋转）：**
+
+      * 遍历 `disks_` 向量中已识别的所有物理磁盘。
+      * 对于每个磁盘，尝试读取 `/sys/block/<device_name>/queue/rotational` 文件。
+      * 这个文件通常包含一个数字：
+          * `0`：表示非旋转磁盘（SSD）。
+          * `1`：表示旋转磁盘（HDD）。
+      * 如果成功读取到 `0`，则将该磁盘的 `is_rotational` 属性设置为 `false`。
+      * 如果文件读取失败（文件不存在或内容异常），则默认将其视为旋转磁盘（`is_rotational` 保持为 `true`），并记录一条信息日志。这是因为对于无法确定类型的磁盘，假设为旋转磁盘通常是更安全的策略，以避免在调度时对潜在的慢速设备进行激进优化。
+
+-----
+
+### 辅助函数 `TryNVMETrim`
+
+```cpp
+bool DiskInfo::TryNVMETrim(const std::string& name_in, std::string* basename_out) {
+  // NVME drives do not follow the typical device naming pattern. The pattern for NVME
+  // drives is nvme{device_id}n{namespace_id}p{partition_id}. The appropriate thing
+  // to do for this pattern is to trim the "p{partition_id}" part.
+  std::regex nvme_regex = std::regex("(nvme[0-9]+n[0-9]+)(p[0-9]+)*");
+  std::smatch nvme_match_result;
+  if (std::regex_match(name_in, nvme_match_result, nvme_regex)) {
+    DCHECK_GE(nvme_match_result.size(), 2);
+    // Match 0 contains the whole string.
+    // Match 1 contains the base nvme device without the partition.
+    *basename_out = nvme_match_result[1];
+    return true;
+  }
+  return false;
+}
+```
+
+  * **目的**：专门处理 NVMe 设备名称的特殊情况。
+  * **实现**：
+      * 使用正则表达式 `(nvme[0-9]+n[0-9]+)(p[0-9]+)*` 来匹配 NVMe 设备的命名模式。
+          * `(nvme[0-9]+n[0-9]+)`：捕获组 1，匹配 `nvme` 后面跟着数字、`n`、再跟着数字的部分，这是 NVMe 设备的基本名称（不含分区）。
+          * `(p[0-9]+)*`：捕获组 2，匹配可选的 `p` 后面跟着分区号的部分。
+      * 如果 `name_in` 字符串与该正则表达式匹配，则 `nvme_match_result[1]` 会包含不带分区号的 NVMe 设备基名（例如，`nvme0n1p1` 匹配后，`nvme_match_result[1]` 为 `nvme0n1`）。
+      * 将提取到的基名赋值给 `basename_out`，并返回 `true`。
+      * 如果不匹配，则返回 `false`。
+
+-----
+
+### 总结
+
+`GetDeviceNames` 是一个健壮的函数，它通过读取标准的 Linux 系统文件来动态地发现和分类物理磁盘设备。它考虑了常见的设备命名约定（如 `sda`）以及特殊的 NVMe 设备命名，并能够判断磁盘是旋转式（HDD）还是固态式（SSD），这对于 Impala 的 I/O 调度器来说是至关重要的信息，因为它会根据磁盘类型采取不同的优化策略（例如，对旋转磁盘进行顺序 I/O 优化，对 SSD 进行随机 I/O 优化）。同时，它也包含了错误处理和默认值设置，以确保即使在某些情况下无法完全获取信息也能正常运行。

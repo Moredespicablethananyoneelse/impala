@@ -1,0 +1,119 @@
+在这个测试文件中，最大内存额度是在 `CreateTestEnv` 函数中设置的，并且在 `CreateHashTable` 函数中进一步使用了这些参数。
+
+### 默认情况下的最大内存额度
+
+在 `CreateTestEnv` 函数的默认参数中：
+
+  * `buffer_bytes_limit` 默认为 `4L * 1024 * 1024 * 1024`，也就是 **4 GB**。
+
+这意味着在大多数测试用例中（除非显式覆盖），`TestEnv` 会被初始化为最大允许的缓冲区池内存为 4 GB。
+
+### 特定测试用例中的内存额度
+
+在 `GrowTableTest` 函数中，为了测试内存限制的情况，显式设置了 `CreateHashTable` 的参数：
+
+```cpp
+const int64_t mem_limit_mb = 128 + 64; // 内存限制 MB
+// ...
+CreateHashTable(quadratic, num_to_add, &hash_table, 1024 * 1024, mem_limit_mb));
+```
+
+这里 `mem_limit_mb` 被设置为 `128 + 64 = 192` MB。这个 `mem_limit_mb` 参数对应于 `CreateHashTable` 中的 `max_num_blocks` 参数，它乘以 `block_size`（这里是 `1024 * 1024` 字节，即 1 MB）来计算 `max_reservation_bytes`。
+
+所以，在 `GrowTableTest` 中，最大内存预留是 `192 * 1MB = 192 MB`。这个测试的目的是模拟哈希表在内存耗尽时的行为。
+
+### 极低内存测试
+
+在 `VeryLowMemTest` 中，内存被有意设置得非常小，以测试内存分配失败的情况：
+
+```cpp
+const int64_t block_size = 2 * 1024; // 2 KB
+const int max_num_blocks = 1; // 1 个块
+// ...
+CreateTestEnv(block_size, block_size * max_num_blocks); // 设置总内存限制为 2KB * 1 = 2KB
+// ...
+ASSERT_FALSE(CreateHashTable(
+    quadratic, table_size, &hash_table, block_size, max_num_blocks, 0, 1024));
+```
+
+在这个测试中，`TestEnv` 和 `CreateHashTable` 都被配置为总共只有 `2 * 1024 = 2048` 字节 (2 KB) 的内存限制，这导致哈希表的创建预期会失败。
+
+-----
+
+总而言之，这个测试允许使用的最大内存额度**取决于具体的测试函数**：
+
+  * **默认情况下**，是 **4 GB**。
+  * 在 `GrowTableTest` 中，是 **192 MB**。
+  * 在 `VeryLowMemTest` 中，是 **2 KB**。
+  *********************************************************************
+  你问得非常敏锐！你提到了对我的解释中关于 `VeryLowMemTest` 的疑虑，特别是关于哈希表创建失败的结论。我们来仔细分析一下这段代码。
+
+-----
+
+## 极低内存测试的内存限制
+
+在 `VeryLowMemTest` 中，内存设置确实非常小：
+
+```cpp
+const int64_t block_size = 2 * 1024; // 2 KB
+const int max_num_blocks = 1; // 1 个块
+// ...
+CreateTestEnv(block_size, block_size * max_num_blocks); // 设置总内存限制为 2KB * 1 = 2KB
+```
+
+这里 `TestEnv` 被配置为\*\*缓冲区池（BufferPool）\*\*的总限制为 **2KB**。这意味着整个测试环境的内存池，包括哈希表可能从中申请的内存，都受到这个 2KB 的硬性限制。
+
+接下来是创建哈希表的部分：
+
+```cpp
+HashTable* hash_table;
+ASSERT_FALSE(CreateHashTable(
+    quadratic, table_size, &hash_table, block_size, max_num_blocks, 0, 1024));
+```
+
+这里 `CreateHashTable` 被调用，其中 `table_size` 是 1024。
+
+-----
+
+## 为什么哈希表创建会失败
+
+现在我们来讨论为什么在这种情况下哈希表创建会失败：
+
+1.  **哈希表桶的内存需求：** 一个哈希表最基本的组成部分就是它的桶（buckets）数组。这个数组的大小通常与 `initial_num_buckets` 参数成比例。在 `CreateHashTable` 函数内部，有这样一行代码：
+
+    ```cpp
+    EXPECT_EQ(initial_num_buckets, BitUtil::RoundUpToPowerOfTwo(initial_num_buckets));
+    int64_t max_num_buckets = 1L << 31; // Max 2^31 buckets
+    *table = pool_.Add(new HashTable(
+        quadratic, allocator, true, 1, nullptr, max_num_buckets, initial_num_buckets));
+    ```
+
+    对于 `VeryLowMemTest`，`initial_num_buckets` 是 1024。这意味着哈希表需要分配至少 1024 个桶。
+
+2.  **桶的大小：** 在 `HashTableTest::BucketSize` 测试中，我们看到 `HashTable::BUCKET_SIZE` 被断言为 8。这意味着每个桶需要 8 字节的内存。
+
+3.  **最低内存需求：** 因此，仅仅为了存储这 1024 个桶，哈希表至少需要 `1024 * 8 字节 = 8192 字节 = 8 KB` 的内存。
+
+4.  **与可用内存的对比：** 然而，我们在 `CreateTestEnv` 中将总内存限制设置为 `2 KB`。
+
+所以，当 `CreateHashTable` 尝试为 1024 个桶分配 8KB 内存时，它会发现**整个环境的缓冲区池只有 2KB 可用**。
+
+-----
+
+## `ASSERT_FALSE` 的作用
+
+`ASSERT_FALSE(CreateHashTable(...))` 这行代码明确地说明了测试的预期：它**期望 `CreateHashTable` 返回 `false`**，这表示哈希表的初始化**失败**了。
+
+`CreateHashTable` 函数的返回值逻辑如下：
+
+```cpp
+bool success;
+Status status = (*table)->Init(&success);
+EXPECT_OK(status);
+return status.ok() && success; // 只有当 status 是 OK 且 success 为 true 时才返回 true
+```
+
+这意味着，如果 `(*table)->Init(&success)` 方法因内存不足而将 `success` 设置为 `false`（即便 `Status` 本身可能仍为 `OK`，表示操作尝试完成但资源不足），`CreateHashTable` 最终也会返回 `false`。
+
+**结论：** 我的说法是正确的。由于哈希表初始化所需的最低内存（8KB）远超过了 `TestEnv` 配置的可用内存（2KB），哈希表的创建（更准确地说，是其内部的初始化过程，特别是桶数组的分配）**预期会失败**。`ASSERT_FALSE` 正是在验证这一预期行为。
+******************************************************

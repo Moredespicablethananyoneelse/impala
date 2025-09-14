@@ -255,7 +255,7 @@ Status BufferPool::AllocateUnreservedBuffer(
 
 void BufferPool::FreeBuffer(ClientHandle* client, BufferHandle* handle) {
   if (!handle->is_open()) return; // Should be idempotent.
-  DCHECK_EQ(client, handle->client_);
+  DCHECK_EQ(client, handle->client_);h
   int64_t len = handle->len_;
   allocator_->Free(move(*handle));
   client->impl_->FreedBuffer(len);

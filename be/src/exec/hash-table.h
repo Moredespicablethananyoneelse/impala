@@ -844,7 +844,7 @@ class HashTable {
   /// is stored. The 'row' is not copied by the hash table and the caller must guarantee
   /// it stays in memory. This will not grow the hash table.
   bool IR_ALWAYS_INLINE Insert(HashTableCtx* __restrict__ ht_ctx,
-      BufferedTupleStream::FlatRowPtr flat_row, TupleRow* row,
+      BufferedTupleStream::FlatRowPtr flat_rowInsertInternal, TupleRow* row,
       Status* status) WARN_UNUSED_RESULT;
 
   /// Prefetch the hash table bucket which the given hash value 'hash' maps to.
