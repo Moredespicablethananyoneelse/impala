@@ -81,6 +81,76 @@ class BufferPool : public CacheLineAligned {
 
 将 `BufferPool` 实例本身设计成 `CacheLineAligned` 能够有效地**避免 `BufferPool` 实例与同一缓存行中的其他不相关数据发生伪共享**。
 
+
+```
+// 验证BufferPool大小为64字节的测试程序
+#include <iostream>
+#include <cstdlib>
+#include <cstdint>
+#include <memory>
+#include <malloc.h> // for _aligned_malloc
+
+#ifndef CACHELINE_SIZE
+#define CACHELINE_SIZE 64
+#endif
+
+// 模拟 AlignedNew 模板
+template <size_t ALIGNMENT>
+struct alignas(ALIGNMENT) AlignedNew {
+    static void* operator new(std::size_t count) {
+        return _aligned_malloc(count, ALIGNMENT);
+    }
+    static void operator delete(void* ptr) {
+        _aligned_free(ptr);
+    }
+};
+
+// 模拟 CacheLineAligned 类
+using CacheLineAligned = AlignedNew<CACHELINE_SIZE>;
+
+// 模拟 BufferPool 类
+class BufferPool : public CacheLineAligned {
+public:
+    BufferPool(int64_t min_len) : min_buffer_len_(min_len) {}
+private:
+    std::unique_ptr<int> allocator_;
+    const int64_t min_buffer_len_;
+};
+
+int main() {
+    std::cout << "验证 BufferPool 对象的大小和地址对齐...\n\n";
+
+    // 1. 验证对象的大小
+    size_t object_size = sizeof(BufferPool);
+    std::cout << "sizeof(BufferPool) = " << object_size << " 字节\n";
+    std::cout << "期望的大小是 64 的倍数。\n";
+    if (object_size % CACHELINE_SIZE == 0) {
+        std::cout << "--> 大小符合预期！\n\n";
+    } else {
+        std::cout << "--> 大小不符合预期！\n\n";
+    }
+
+    // 2. 验证 new 分配的对象的地址对齐
+    BufferPool* bp_ptr = new BufferPool(1024);
+    std::cout << "使用 new 分配的 BufferPool 对象地址： " << bp_ptr << "\n";
+    
+    // 将地址转换为 uintptr_t 类型以进行位运算
+    uintptr_t address = reinterpret_cast<uintptr_t>(bp_ptr);
+    std::cout << "地址（十六进制）： " << std::hex << address << std::dec << "\n";
+    std::cout << "验证地址是否是 64 的倍数...\n";
+
+    if (address % CACHELINE_SIZE == 0) {
+        std::cout << "--> 地址对齐符合预期！" << "\n";
+    } else {
+        std::cout << "--> 地址对齐不符合预期！" << "\n";
+    }
+
+    // 释放内存
+    _aligned_free(bp_ptr); // 使用 _aligned_free 释放
+
+    return 0;
+}
+```
 -----
 
 #### 伪共享的原理及避免
