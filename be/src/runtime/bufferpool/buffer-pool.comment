@@ -402,3 +402,194 @@ boost::scoped_ptr<ReservationTracker> tracker_;
 ---
 
 希望这个解释能帮你更好地理解 `Suballocator` 的作用！
+
+*****************************************************************************
+/// A buffer pool that manages memory buffers for all queries in an Impala daemon.
+/// 一个缓冲区池，用于管理Impala守护进程中所有查询的内存缓冲区。
+
+/// The buffer pool enforces buffer reservations, limits, and implements policies
+/// 该缓冲区池实施缓冲区预约机制和使用限制，并实现了
+/// for moving spilled memory from in-memory buffers to disk. It also enables reuse of
+/// 将溢出内存从内存缓冲区迁移到磁盘的策略。它还支持查询间的缓冲区复用，
+/// buffers between queries, to avoid frequent allocations.
+/// 以避免频繁的内存分配操作。
+
+///
+/// The buffer pool can be used for allocating any large buffers (above a configurable
+/// 该缓冲区池可用于分配任何大型缓冲区（超过可配置的最小长度），
+/// minimum length), whether or not the buffers will be spilled. Smaller allocations
+/// 无论这些缓冲区是否会被溢出到磁盘。小型内存分配不由缓冲区池直接处理：
+/// are not serviced directly by the buffer pool: clients of the buffer pool must
+/// 缓冲区池的客户端若需使用更小的分配单元，必须自行对缓冲区进行拆分。
+/// subdivide buffers if they wish to use smaller allocations.
+
+///
+/// All buffer pool operations are in the context of a registered buffer pool client.
+/// 所有缓冲区池操作均在已注册的缓冲区池客户端上下文中执行。
+/// A buffer pool client should be created for every allocator of buffers at the level
+/// 对于每个缓冲区分配器，应在需要报告和实施预约机制的粒度级别（例如算子）
+/// of granularity required for reporting and enforcement of reservations, e.g. an
+/// 创建一个缓冲区池客户端。
+/// operator. The client tracks buffer reservations via its ReservationTracker and also
+/// 客户端通过其ReservationTracker跟踪缓冲区预约情况，并包含有助于调试的信息
+/// includes info that is helpful for debugging (e.g. the operator that is associated
+/// （例如与缓冲区关联的算子）。除非另有说明，否则对同一客户端并发执行
+/// with the buffer). Unless otherwise noted, it is not safe to invoke concurrent buffer
+/// 缓冲区池操作是不安全的。
+/// pool operations for the same client.
+
+///
+/// Pages, Buffers and Pinning
+/// 页（Pages）、缓冲区（Buffers）与固定（Pinning）
+/// ==========================
+/// * A page is a logical block of memory that can reside in memory or on disk.
+/// * 页（page）是一个逻辑内存块，可驻留在内存中或磁盘上。
+/// * A buffer is a physical block of memory that can hold a page in memory.
+/// * 缓冲区（buffer）是一个物理内存块，可在内存中存储一页数据。
+/// * A page handle is used by buffer pool clients to identify and access a page and
+/// * 页句柄（page handle）由缓冲区池客户端用于标识和访问页及其对应的缓冲区。
+///   the corresponding buffer. Clients do not interact with pages directly.
+///   客户端不直接与页进行交互。
+/// * A buffer handle is used by buffer pool clients to identify and access a buffer.
+/// * 缓冲区句柄（buffer handle）由缓冲区池客户端用于标识和访问缓冲区。
+/// * A page is pinned if it has pin count > 0. A pinned page stays mapped to the same
+/// * 若页的固定计数（pin count）> 0，则该页被固定（pinned）。固定的页会保持
+///   buffer.
+///   与同一缓冲区的映射关系。
+/// * An unpinned page can be written out to disk by the buffer pool so that the buffer
+/// * 未固定（unpinned）的页可被缓冲区池写入磁盘，以便该缓冲区可用于其他用途。
+///   can be used for another purpose.
+
+///
+/// Buffer/Page Sizes
+/// 缓冲区/页大小
+/// =================
+/// The buffer pool has a minimum buffer size, which must be a power-of-two. Page and
+/// 缓冲区池有一个最小缓冲区大小，该大小必须是2的幂。页和缓冲区的大小必须是
+/// buffer sizes must be an exact power-of-two multiple of the minimum buffer size.
+/// 最小缓冲区大小的2的幂倍数。
+
+///
+/// Reservations
+/// 预约机制
+/// ============
+/// Before allocating buffers or pinning pages, a client must reserve memory through its
+/// 在分配缓冲区或固定页之前，客户端必须通过其ReservationTracker预约内存。
+/// ReservationTracker. Reservation of n bytes give a client the right to allocate
+/// 预约n字节意味着客户端有权分配缓冲区或固定页，其总大小不超过n字节。
+/// buffers or pin pages summing up to n bytes. Reservations are both necessary and
+/// 预约是客户端分配缓冲区或固定页的必要且充分条件：除非遇到"系统错误"（如磁盘写入错误
+/// sufficient for a client to allocate buffers or pin pages: the operations succeed
+/// 导致未固定页无法写入磁盘），否则这些操作都会成功。
+/// unless a "system error" such as a disk write error is encountered that prevents
+/// unpinned pages from being written to disk.
+
+///
+/// More memory may be reserved than is used, e.g. if a client is not using its full
+/// 预约的内存可能多于实际使用的内存，例如客户端未充分使用其预约额度。
+/// reservation. In such cases, the buffer pool can use the free buffers in any way,
+/// 在这种情况下，缓冲区池可以以任何方式使用空闲缓冲区，例如将未固定页保存在内存中，
+/// e.g. for keeping unpinned pages in memory, so long as it is able to fulfill the
+/// 只要能在需要时满足预约（例如通过将未固定页刷新到磁盘）即可。
+/// reservations when needed, e.g. by flushing unpinned pages to disk.
+
+///
+/// Page/Buffer Handles
+/// 页/缓冲区句柄
+/// ===================
+/// The buffer pool exposes PageHandles and BufferHandles, which are owned by clients of
+/// 缓冲区池对外提供PageHandle和BufferHandle，这些句柄由缓冲区池的客户端所有，
+/// the buffer pool, and act as a proxy for the internal data structure representing the
+/// 作为缓冲区池中表示页或缓冲区的内部数据结构的代理。
+/// page or buffer in the buffer pool. Handles are "open" if they are associated with a
+/// 若句柄与某个页或缓冲区相关联，则该句柄为"打开"状态。
+/// page or buffer. An open PageHandle is obtained by creating a page. PageHandles are
+/// 通过创建页可获得打开的PageHandle。调用BufferPool::DestroyPage()可关闭PageHandle。
+/// closed by calling BufferPool::DestroyPage(). An open BufferHandle is obtained by
+/// 通过分配缓冲区或从PageHandle中提取可获得打开的BufferHandle。
+/// allocating a buffer or extracting a BufferHandle from a PageHandle. The buffer of a
+/// 固定页的缓冲区也可通过PageHandle访问。
+/// pinned page can also be accessed through the PageHandle. The handle destructors check
+/// 句柄的析构函数会检查资源泄漏，例如未关闭的句柄可能导致缓冲区泄漏。
+/// for resource leaks, e.g. an open handle that would result in a buffer leak.
+
+///
+/// Pin Counting of Page Handles:
+/// 页句柄的固定计数：
+/// ----------------------------------
+/// Page handles are scoped to a client. The invariants are as follows:
+/// 页句柄的作用域限定为其所属的客户端。其不变量如下：
+/// * A page can only be accessed through an open handle.
+/// * 页只能通过打开的句柄访问。
+/// * A page is destroyed once the handle is destroyed via DestroyPage().
+/// * 一旦通过DestroyPage()销毁句柄，对应的页也会被销毁。
+/// * A page's buffer can only be accessed through a pinned handle.
+/// * 页的缓冲区只能通过固定的句柄访问。
+/// * Pin() can be called on an open handle, incrementing the handle's pin count.
+/// * 可对打开的句柄调用Pin()，以增加句柄的固定计数。
+/// * Unpin() can be called on a pinned handle, but not an unpinned handle.
+/// * 可对已固定的句柄调用Unpin()，但不能对未固定的句柄调用。
+/// * Pin() always increases usage of reservations, and Unpin() always decreases usage,
+/// * Pin()始终会增加预约的使用量，Unpin()始终会减少预约的使用量，即
+///   i.e. the handle consumes <pin count> * <page size> bytes of reservation.
+///   句柄消耗的预约量为<固定计数> * <页大小>字节。
+
+///
+/// Example Usage: Buffers
+/// 使用示例：缓冲区
+/// ==================================
+/// The simplest use case is to allocate a memory buffer.
+/// 最简单的用例是分配内存缓冲区。
+/// * The new buffer is created with AllocateBuffer().
+/// * 通过AllocateBuffer()创建新缓冲区。
+/// * The client reads and writes to the buffer as it sees fit.
+/// * 客户端可根据需要对缓冲区进行读写操作。
+/// * If the client is done with the buffer's contents it can call FreeBuffer() to
+/// * 若客户端使用完缓冲区内容，可调用FreeBuffer()销毁句柄并释放缓冲区，
+///   destroy the handle and free the buffer, or use TransferBuffer() to transfer
+///   或使用TransferBuffer()将缓冲区转移给其他客户端。
+///   the buffer to a different client.
+
+///
+/// Example Usage: Spillable Pages
+/// 使用示例：可溢出页
+/// ==============================
+/// * In order to spill pages to disk, the Client must be registered with a FileGroup,
+/// * 为了将页溢出到磁盘，客户端必须注册一个FileGroup，用于在磁盘上分配临时空间。
+///   which is used to allocate scratch space on disk.
+///
+/// * A spilling operator creates a new page with CreatePage().
+/// * 支持溢出的算子通过CreatePage()创建新页。
+/// * The client reads and writes to the page's buffer as it sees fit.
+/// * 客户端可根据需要对页的缓冲区进行读写操作。
+/// * If the operator encounters memory pressure, it can decrease reservation usage by
+/// * 若算子遇到内存压力，可通过调用Unpin()减少该页的预约使用量。
+///   calling Unpin() on the page. The page may then be written to disk and its buffer
+///   之后，该页可能被写入磁盘，其缓冲区会被缓冲区池重新分配使用。
+///   repurposed internally by BufferPool.
+/// * Once the operator needs the page's contents again and has sufficient unused
+/// * 一旦算子再次需要该页的内容且有足够的未使用预约，可调用Pin()将页的内容
+///   reservation, it can call Pin(), which brings the page's contents back into memory,
+///   读回内存（可能存储在不同的缓冲区中）。因此，算子必须修正所有指向
+///   perhaps in a different buffer. Therefore the operator must fix up any pointers into
+///   先前缓冲区的指针。Pin()以异步方式执行——若调用者在读取过程中调用
+///   the previous buffer. Pin() executes asynchronously - the caller only blocks waiting
+///   GetBuffer()或ExtractBuffer()，则会阻塞等待读取I/O完成。
+///   for read I/O if it calls GetBuffer() or ExtractBuffer() while the read is in
+///   flight.
+/// * If the operator is done with the page, it can call DestroyPage() to destroy the
+/// * 若算子使用完该页，可调用DestroyPage()销毁句柄并释放资源，或调用
+///   handle and release resources, or call ExtractBuffer() to extract the buffer.
+///   ExtractBuffer()提取缓冲区。
+
+///
+/// Synchronization
+/// 同步机制
+/// ===============
+/// The data structures in the buffer pool itself are thread-safe. Client-owned data
+/// 缓冲区池自身的数据结构是线程安全的。客户端拥有的数据结构（Client、PageHandle和
+/// structures - Client, PageHandle and BufferHandle - are not protected from concurrent
+/// BufferHandle）不具备并发访问保护。客户端必须确保不对同一Client、PageHandle或
+/// accesses. Clients must ensure that they do not invoke concurrent operations with the
+/// BufferHandle执行并发操作。
+/// same Client, PageHandle or BufferHandle.
