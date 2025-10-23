@@ -1,0 +1,60 @@
+好的，下面是对该 `FileReader` 类实现部分的注释翻译：
+
+```cpp
+/// 文件操作的抽象类
+/// 子类实现这些操作，用于本地文件系统和 HDFS。
+/// 一个 `FileReader` 对象由一个 `ScanRange` 对象拥有，
+/// 并且每个 `ScanRange` 对象只能有一个 `FileReader` 对象。
+class FileReader {
+public:
+  FileReader(ScanRange* scan_range) : scan_range_(scan_range) {}
+  virtual ~FileReader() {}
+
+  /// 打开与 'scan_range_' 相关联的文件。
+  virtual Status Open() = 0;
+
+  /// 从给定位置（'file_offset'）读取字节。尝试读取 'bytes_to_read' 字节。
+  /// 'bytes_read' 包含实际读取的字节数。'eof' 在文件末尾时设置为 true。
+  /// 'queue' 中的度量值会更新底层文件系统的读取操作的大小和延迟。
+  virtual Status ReadFromPos(DiskQueue* queue, int64_t file_offset, uint8_t* buffer,
+      int64_t bytes_to_read, int64_t* bytes_read, bool* eof) = 0;
+
+  /// ***当前仅适用于 HDFS***
+  /// 成功时，'data' 被设置为包含文件内容的缓存，'length' 被设置为数据的长度。
+  /// 不支持延迟打开。
+  /// 失败时，'data' 被设置为 nullptr。
+  virtual void CachedFile(uint8_t** data, int64_t* length) = 0;
+
+  /// 关闭与 'scan_range_' 相关联的文件。此操作不会影响其他扫描范围。
+  virtual void Close() = 0;
+
+  /// 重写此方法，返回 true 如果实现支持在不先调用 Open 的情况下调用 ReadFromPos。
+  /// 在缓存数据或文件句柄时，此功能非常有用。
+  virtual bool SupportsDelayedOpen() const { return false; }
+
+  /// 重置内部状态
+  virtual void ResetState() {}
+
+  // 此文件读取器的调试字符串。
+  virtual std::string DebugString() const { return ""; }
+
+  SpinLock& lock() { return lock_; }
+protected:
+  /// 在文件系统调用期间需要获取的锁。一次只有一个线程（磁盘读取线程）调用文件系统操作，
+  /// 所以这个锁不会影响性能。此锁仅用于协调清理工作。具体来说，它确保在设置 scan_range_->is_cancelled_
+  /// 为 true 并开始清理之前，磁盘线程完成文件系统调用。
+  /// 如果需要获取此锁和 scan_range_->lock_，必须先获取 scan_range_->lock_。
+  SpinLock lock_;
+
+  /// 此文件读取器服务的扫描范围。
+  ScanRange* const scan_range_;
+};
+```
+
+### 关键翻译点：
+
+1. **抽象类描述**：`FileReader` 是一个抽象类，定义了文件操作的接口。不同文件系统（本地文件系统、HDFS）会通过继承该类来实现具体的文件操作。
+2. **文件读取接口**：包括打开文件、读取文件、缓存文件、关闭文件等操作。
+3. **延迟打开**：该接口支持子类判断是否可以在不先打开文件的情况下直接读取文件数据（如缓存文件）。
+4. **锁机制**：使用 `SpinLock` 确保文件系统操作是线程安全的，避免并发操作冲突。
+5. **调试支持**：提供调试字符串方法，帮助开发人员调试和排查问题。

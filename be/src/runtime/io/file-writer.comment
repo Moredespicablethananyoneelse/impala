@@ -1,0 +1,79 @@
+
+
+#pragma once
+
+#include <string>
+
+#include "common/status.h"
+
+namespace impala {
+class TmpFile;
+namespace io {
+class DiskIoMgr;
+class WriteRange;
+
+/// Abstract class that provides interface for file writing operations.
+/// Child classes implement these operations for the local file system
+/// and for HDFS.
+/// A typical process is calling Open(), then Write() with certain
+/// WriteRange objects, after the writing finished, call the Close() to
+/// close the file handle. The writes are the sequential operations to
+/// the same file.
+/// 提供文件写入操作接口的抽象类。
+/// 子类为本地文件系统和 HDFS 实现这些操作。
+/// 典型流程是调用 Open ()，然后使用特定的 WriteRange 对象调用 Write ()，
+/// 写入完成后，调用 Close () 关闭文件句柄。写入操作是对同一文件的顺序操作。
+class FileWriter {
+ public:
+  FileWriter(DiskIoMgr* io_mgr, const char* file_path, const int64_t file_size)
+    : io_mgr_(io_mgr), file_path_(file_path), file_size_(file_size) {}
+  virtual ~FileWriter() {}
+
+  /// The set of Open/Write/Close function is used for sequential range writing
+  /// for a specific file. The file handle is opened and closed only once per
+  /// file by calling Open() and Close(). By calling the Write(), the write
+  /// ranges are written into the file sequentially in different threads using
+  /// the same file handle.
+  /// The caller needs to call the Close() to close the file handle when is_full
+  /// is returned True in Write().
+  /// Open/Write/Close 函数集用于特定文件的顺序范围写入。
+  /// 通过调用 Open () 和 Close ()，每个文件只打开和关闭一次文件句柄。
+  /// 调用 Write () 时，写入范围会在不同线程中使用相同的文件句柄按顺序写入文件。
+  /// 当 Write () 返回 is_full 为 True 时，调用者需要调用 Close () 关闭文件句柄。
+  virtual Status Open() = 0;
+  virtual Status Write(WriteRange* range, int64_t* written_bytes) = 0;
+  virtual Status Close() = 0;
+
+  /// The WriteOne function is used for a random range writing. The caller would
+  /// expect the function to open a file handle of the file, write the range, and
+  /// close the file handle.
+  /// WriteOne 函数用于随机范围写入。调用者期望该函数打开文件的文件句柄，
+  /// 写入范围，然后关闭文件句柄。
+  virtual Status WriteOne(WriteRange*) = 0;
+
+ protected:
+  /// DiskIoMgr used for the I/O operations and the statistics.
+  DiskIoMgr* io_mgr_ = nullptr;
+
+  /// The lock_ is to guarantee only one thread is using the file handle.
+  /// Ideally, Open() and Close() would be called once for each file writer, so
+  /// the lock_ is a exclusive lock mainly for running the Write().
+  /// WriteOne() doesn't need the lock_ because it opens its own file handle,
+  /// and doesn't share it with other WriteRanges.
+  ///lock_用于保证只有一个线程在使用文件句柄。/
+  // 理想情况下，每个文件写入器的 Open () 和 Close () 只会被调用一次，
+  /// 因此 lock_主要是 Write () 运行时的互斥锁。
+  /// WriteOne () 不需要 lock_，因为它会打开自己的文件句柄，不与其他 WriteRange 共享。
+  std::mutex lock_;
+
+  /// The bytes have been written by the file writer.
+  int64_t written_bytes_ = 0;
+
+  /// The file path to be written.
+  const char* file_path_;
+
+  /// The size of the file.
+  const int64_t file_size_;
+};
+} // namespace io
+} // namespace impala

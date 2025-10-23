@@ -150,6 +150,7 @@ class BufferPool : public CacheLineAligned {
   class PageHandle;
   class SubReservation;
 
+  //DEFINE_int64(min_buffer_size, 8 * 1024,  "(Advanced) The minimum buffer size to use in the buffer pool");
   /// Constructs a new buffer pool.
   /// 'min_buffer_len': the minimum buffer length for the pool. Must be a power of two.
   /// 'buffer_bytes_limit': the maximum physical memory in bytes that can be used by the

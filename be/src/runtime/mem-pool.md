@@ -1,3 +1,317 @@
+
+
+WIP: IMPALA-13486: Support MemPool backed by BufferPool in parquet scanner
+
+MemPool is used as an Arena that pre-allocates memory chunks to save
+frequent calls on malloc() and free() from the thread. It's helpful
+especially for small objects that have a similar lifetime and fit into
+the pre-allocated chunks. However, when allocating a large memory space
+that no free chunks can fit, it still invokes malloc() to allocate the
+space.
+
+TCMalloc is used in Impala as the memory allocator. It has a ThreadCache
+for each thread to serve small allocations. However, for allocations
+larger than 256KB, they are served by the Central Cache of TCMalloc
+which has lock contention on its CentralFreeList.
+
+Currently, when scanner threads allocate large memory spaces from
+MemPool, they suffer from this TCMalloc contention. Performance degrades
+as concurrency increases.
+
+BufferPool is another memory management layer in Impala to handle memory
+reservation and spill-to-disk for all queries. It also enables reuse of
+buffers (memory spaces) between queries, to avoid frequent allocations.
+Allocating large buffers from BufferPool won't hit the above TCMalloc
+contention issue if the allocations can be served by previously freed
+buffers.
+
+This patch extends MemPool to be able to allocate memory chunks using
+BufferPool. A new constructor passing a BufferPool client is added to
+enable this mode. MemPool now manages a list of memory chunks allocated
+from malloc() and a list of buffers allocated from BufferPool. MemPools
+in different modes can acquire data from each other, by updating these
+two lists.
+
+ScratchTupleBatch is used in Parquet/ORC scanners to materialize tuples
+before evaluating filters. It currently has two MemPools, tuple_mem_pool
+and aux_mem_pool, for the fix-sized and var-len parts respectively.
+ParquetColumnChunkReader has a data_page_pool_ which allocates memory
+for decompressed/copied Parquet data pages. These three kinds of
+MemPools are where a scanner could allocate large memory space. They are
+now backed by BufferPool to avoid the above TCMalloc contention issue.
+
+Min reservation of the HdfsScanNode is increased for these allocation.
+
+----------
+Limitation
+
+When allocating memory from BufferPool, MemPool uses
+AllocateUnreservedBuffer() which might increase memory reservation in
+runtime to fit the space that used to be allocated from malloc(). This
+makes the query easier to hit OOM when it couldn't increase the
+reservation. Some tests that expect the query can run with the minimal
+reservation, i.e.
+DEBUG_ACTION="-1:OPEN:SET_DENY_RESERVATION_PROBABILITY@1.0", failed due
+to this.
+
+AllocateUnreservedBuffer() consumes memory reservation of the operator.
+When transferring data to downstream operators, the used reservation
+needs to be transferred together. This is a TODO item of this patch.
+It's a problem in MT_DOP=0, i.e. HdfsScanNode, since
+HdfsScanNode::ReturnReservationFromScannerThread() can't return the
+reservation requested for the scanner thread. Reservation that
+previously used by IO buffers might be used in the output RowBatch so
+can't be returned when the scanner thread is closed. No such problem in
+MT_DOP>0 where HdfsScanNode::ReturnReservationFromScannerThread() is not
+used. The current patch still uses the old MemPool mode when MT_DOP=0.
+
+TODO: test ORC scanner
+
+Change-Id: I7cf0eac43fa98cb4cff66e5061f5bb561487d6ab
+
+
+以下是你提供的内容的中文翻译：
+
+---
+
+**WIP: IMPALA-13486：在 Parquet 扫描器中支持由 BufferPool 支持的 MemPool**
+
+MemPool 被用作一个 Arena（内存池），预先分配内存块以减少线程频繁调用 `malloc()` 和 `free()`。这对于生命周期相似、可以放入预分配块中的小对象尤其有用。然而，当需要分配较大的内存空间且没有可用块容纳时，它仍会调用 `malloc()` 进行分配。
+
+Impala 使用 TCMalloc 作为内存分配器。TCMalloc 为每个线程提供一个 ThreadCache 来处理小额分配。然而，对于大于 256KB 的分配，会由 TCMalloc 的 Central Cache 提供，该部分存在 CentralFreeList 的锁竞争问题。
+
+当前，在扫描器线程从 MemPool 分配大内存空间时，会遇到 TCMalloc 的竞争问题，随着并发度提升，性能会下降。
+
+BufferPool 是 Impala 中另一个内存管理层，负责所有查询的内存保留和落盘（spill-to-disk）。它还能实现不同查询之间对缓冲区（内存空间）的复用，以避免频繁分配。如果能由之前释放的缓冲区提供分配，则从 BufferPool 分配大缓冲区不会触发上述 TCMalloc 的竞争问题。
+
+本补丁扩展了 MemPool，使其能够通过 BufferPool 分配内存块。添加了一个新构造函数，允许传入 BufferPool 客户端以启用该模式。现在，MemPool 会管理两个列表：一个是通过 `malloc()` 分配的内存块列表，另一个是通过 BufferPool 分配的缓冲区列表。在不同模式下的 MemPool 实例可以通过更新这两个列表彼此获取数据。
+
+`ScratchTupleBatch` 用于 Parquet/ORC 扫描器中，在应用过滤器前对 tuple 进行实例化。它目前有两个 MemPool：`tuple_mem_pool` 和 `aux_mem_pool`，分别用于固定长度和变长部分。`ParquetColumnChunkReader` 有一个 `data_page_pool_`，用于分配解压/复制后的 Parquet 数据页内存。这三类 MemPool 是扫描器可能会分配大内存空间的地方。它们现在由 BufferPool 支持，从而避免了上述 TCMalloc 的竞争问题。
+
+为这些分配场景，`HdfsScanNode` 的最小内存保留值被提高。
+
+---
+
+**限制**
+
+当从 BufferPool 分配内存时，MemPool 使用 `AllocateUnreservedBuffer()`，该方法可能在运行时增加内存保留量，以适应原本由 `malloc()` 分配的空间。这使得查询更容易因为无法增加内存保留而导致 OOM（内存溢出）。一些期望查询能够使用最小内存保留就能运行的测试因此失败，例如设置了 `DEBUG_ACTION="-1:OPEN:SET_DENY_RESERVATION_PROBABILITY@1.0"` 的测试。
+
+`AllocateUnreservedBuffer()` 会消耗操作符的内存保留。在将数据传递给下游操作符时，使用的保留也需要一并传递。这是本补丁中尚未完成的工作项。
+
+在 `MT_DOP=0`（即多线程并发度为 0，HdfsScanNode 单线程扫描）时，这是一个问题，因为 `HdfsScanNode::ReturnReservationFromScannerThread()` 无法返回为扫描线程请求的保留内存。之前由 IO 缓冲区使用的保留可能在输出 `RowBatch` 中仍然被使用，因此无法在关闭扫描线程时归还。而在 `MT_DOP>0` 时没有此问题，因为不会使用 `HdfsScanNode::ReturnReservationFromScannerThread()`。
+
+因此，在当前补丁中，当 `MT_DOP=0` 时仍使用旧的 MemPool 模式。
+
+
+*********************************************************************************8
+# Impala MemPool 设计实操解析（从逻辑到代码落地）
+## 一、核心设计逻辑：一句话讲透
+MemPool 的核心是 **“Chunk 池化管理 + 动态尺寸策略 + 场景化接口”**——用预分配的大内存块（Chunk）承接频繁的小分配，通过动态调整 Chunk 尺寸平衡效率与空间，再用多样化接口适配数据库查询的内存需求，最终实现“少系统调用、低碎片、可追踪”的内存管理。
+
+
+## 二、核心数据结构：记住 3 个关键组件
+### 1. ChunkInfo：内存块的“身份证”
+```cpp
+struct ChunkInfo {
+  uint8_t* data;         // 内存块起始地址（malloc 分配）
+  int64_t size;          // 内存块总大小（比如 4KB、8KB）
+  int64_t allocated_bytes;  // 已分配的字节数（比如用了 2KB）
+};
+```
+- 每个 Chunk 是连续内存，是 MemPool 管理的最小单位；
+- 所有 Chunk 存在 `std::vector<ChunkInfo> chunks_` 列表中，按“已使用→空闲”排序。
+
+### 2. 核心状态变量：掌握 MemPool 的“运行状态”
+| 变量名                | 作用                                  | 关键规则                                                                 |
+|-----------------------|---------------------------------------|--------------------------------------------------------------------------|
+| current_chunk_idx_    | 当前活跃 Chunk 的索引                 | -1 表示无 Chunk；0~idx-1 是已用 Chunk；idx+1~末尾是空闲 Chunk            |
+| next_chunk_size_      | 下一个 Chunk 的预设大小               | 初始 4KB，每次翻倍（4→8→16→...），最大 512KB                              |
+| total_allocated_bytes_| 所有 Chunk 已分配的总字节数（实际用量）| 比如 10KB（含对齐填充）                                                  |
+| total_reserved_bytes_ | 所有 Chunk 的总大小（预分配总量）     | 比如 16KB（可能有 6KB 空闲）                                              |
+| mem_tracker_          | 内存追踪器                            | 统计、限制内存使用（比如不让单查询用超 1GB）                              |
+| enforce_binary_chunk_sizes_ | 强制 Chunk 为 2 的幂 | true→5KB 变 8KB；false→保持 5KB（平衡对齐与空间）                        |
+
+### 3. 统计结构体：性能分析的“放大镜”
+```cpp
+struct MemPoolCounters {
+  SummaryStats sys_alloc_duration;  // malloc 耗时统计
+  SummaryStats sys_free_duration;   // free 耗时统计
+  SummaryStats allocated_bytes;     // 分配字节数统计
+  SummaryStats freed_bytes;         // 释放字节数统计
+};
+```
+- 用于定位性能瓶颈（比如 malloc 耗时太长）。
+
+
+## 三、内存分配：3 步走流程（附代码对应逻辑）
+### 先明确入口：常用分配接口
+| 接口名                  | 用途                                  | 失败处理       |
+|-------------------------|---------------------------------------|----------------|
+| Allocate(100)           | 分配 100 字节，默认 8 字节对齐        | 失败抛异常     |
+| TryAllocate(100)        | 分配 100 字节，检查内存限制           | 失败返回 NULL  |
+| TryAllocateAligned(100, 16) | 16 字节对齐（适配 SIMD 指令）       | 失败返回 NULL  |
+| TryAllocateUnaligned(100) | 无对齐要求（省空间）                 | 失败返回 NULL  |
+
+### 核心流程：以 `Allocate(100)` 为例
+#### 第 1 步：优先用“当前活跃 Chunk”
+```cpp
+// 假设 current_chunk_idx_ = 0（第一个 Chunk），size=4KB，已用 3KB
+ChunkInfo& info = chunks_[0];
+// 计算对齐后的偏移：比如已用 3000 字节，8 字节对齐→3000→3000（刚好对齐）
+int64_t aligned_allocated_bytes = BitUtil::RoundUpToPowerOf2(3000, 8);
+// 检查剩余空间：4096 - 3000 = 1096 ≥ 100 → 足够
+if (3000 + 100 ≤ 4096) {
+  uint8_t* result = info.data + 3000;  // 分配起始地址
+  info.allocated_bytes = 3000 + 100;   // 已用更新为 3100
+  total_allocated_bytes_ += 100;       // 总用量更新
+  return result;
+}
+```
+- 若当前 Chunk 剩余空间够（含对齐后），直接在尾部分配，最快！
+
+#### 第 2 步：找“空闲 Chunk”复用
+如果当前 Chunk 不够（比如已用 4000 字节，剩余 96 < 100），进入 `FindChunk` 方法：
+```cpp
+// 定位第一个空闲 Chunk 的索引（比如 current_chunk_idx_=0，已用→first_free_idx=1）
+int first_free_idx = 1;
+// 遍历 idx=1 及以后的空闲 Chunk
+for (int idx = 1; idx < chunks_.size(); ++idx) {
+  if (chunks_[idx].size ≥ 100) {  // 找到一个 8KB 的空闲 Chunk
+    std::swap(chunks_[idx], chunks_[1]);  // 移到 first_free_idx 位置（方便后续复用）
+    current_chunk_idx_ = 1;  // 切换当前活跃 Chunk 为这个空闲 Chunk
+    return true;
+  }
+}
+```
+- 优先复用已有空闲 Chunk，减少 malloc 调用。
+
+#### 第 3 步：分配新 Chunk
+如果没有空闲 Chunk，创建新的：
+```cpp
+// 计算新 Chunk 大小：next_chunk_size_=4KB，需求 100→取 4KB
+int64_t chunk_size = max(100, 4096);
+// 若 enforce_binary_chunk_sizes_=true，强制 2 的幂（这里 4KB 已是，不变）
+// 检查内存限制（Allocate 接口不检查，TryAllocate 会检查）
+mem_tracker_->Consume(4096);
+// 调用 malloc 分配 4KB 内存
+uint8_t* buf = reinterpret_cast<uint8_t*>(malloc(4096));
+// 插入到 chunks_ 列表的 first_free_idx 位置
+chunks_.insert(chunks_.begin() + 1, ChunkInfo(4096, buf));
+// 更新 next_chunk_size_：4KB *2 =8KB（下次分配预设 8KB）
+next_chunk_size_ = min(4096*2, 524288);  // 524288=512KB（最大值）
+// 切换当前活跃 Chunk 为新分配的 Chunk
+current_chunk_idx_ = 1;
+```
+- 新 Chunk 尺寸动态增长，避免小分配浪费、大分配频繁调用 malloc。
+
+
+## 四、内存释放：3 种场景+代码逻辑
+### 1. Clear()：重置复用（不删 Chunk）
+```cpp
+void MemPool::Clear() {
+  current_chunk_idx_ = -1;  // 重置当前活跃 Chunk
+  for (auto& chunk: chunks_) {
+    chunk.allocated_bytes = 0;  // 所有 Chunk 标记为未使用
+    ASAN_POISON_MEMORY_REGION(chunk.data, chunk.size);  // 标记未使用内存（调试用）
+  }
+  total_allocated_bytes_ = 0;
+}
+```
+- 用例：同一查询内重复用内存（比如多次过滤计算），不用重新分配 Chunk。
+
+### 2. FreeAll()：彻底释放（删所有 Chunk）
+```cpp
+void MemPool::FreeAll() {
+  int64_t total_bytes_released = 0;
+  for (auto& chunk: chunks_) {
+    total_bytes_released += chunk.size;
+    free(chunk.data);  // 释放每个 Chunk 的内存
+    // 统计 free 耗时和释放字节数
+    counters_.sys_free_duration.UpdateCounter(sw.Reset());
+    counters_.freed_bytes.UpdateCounter(chunk.size);
+  }
+  chunks_.clear();  // 清空 Chunk 列表
+  next_chunk_size_ = 4096;  // 重置下次分配大小
+  current_chunk_idx_ = -1;
+  total_allocated_bytes_ = 0;
+  total_reserved_bytes_ = 0;
+  mem_tracker_->Release(total_bytes_released);  // 更新内存追踪
+}
+```
+- 用例：查询结束后彻底释放，避免内存泄漏。
+
+### 3. AcquireData()：内存转移（算子间传数据）
+```cpp
+void MemPool::AcquireData(MemPool* src, bool keep_current) {
+  // 计算要转移的 Chunk 数量（比如 src 有 2 个数据 Chunk）
+  int num_acquired_chunks = src->current_chunk_idx_ + 1;
+  // 转移 Chunk 所有权：从 src 移到当前 MemPool
+  chunks_.insert(chunks_.end(), src->chunks_.begin(), src->chunks_.begin()+num_acquired_chunks);
+  // 更新内存追踪：src 释放，当前 MemPool 承接
+  src->mem_tracker_->TransferTo(mem_tracker_, total_transfered_bytes);
+  // 清空 src 的数据 Chunk
+  src->chunks_.erase(src->chunks_.begin(), src->chunks_.begin()+num_acquired_chunks);
+}
+```
+- 用例：哈希连接的 Build 阶段生成哈希表后，将内存转移给 Probe 阶段，避免拷贝。
+
+
+## 五、关键设计细节：为什么这么设计？（实操避坑）
+### 1. 对齐处理：为什么会有“内部碎片”？
+- 代码中 `aligned_allocated_bytes` 会将已用字节数向上对齐到 `alignment`（默认 8）；
+- 比如已用 10 字节，下次分配 8 字节对齐→偏移 16 字节，中间 6 字节是“内部碎片”；
+- 权衡：对齐能提升内存访问速度（比如 CPU 缓存命中率），数据库场景下“速度比省空间重要”。
+
+### 2. 动态 Chunk 尺寸：为什么 4KB 起步、翻倍增长？
+- 小分配（比如 100 字节）用 4KB Chunk→不浪费；
+- 大分配（比如 200KB）用 256KB Chunk（翻倍到 256KB）→减少 malloc 次数；
+- 最大值 512KB：太大的 Chunk 会浪费空间，且 512KB 能适配 TCMalloc 等分配器的缓存策略。
+
+### 3. 为什么不遍历所有 Chunk 找空闲空间？
+- 代码中只遍历 `current_chunk_idx_` 之后的空闲 Chunk，不回头找之前的 Chunk；
+- 比如第 0 个 Chunk 剩 64KB，第 1 个 Chunk 剩 512KB，分配 32KB 会用第 1 个，第 0 个的 64KB 浪费；
+- 权衡：遍历所有 Chunk 会增加开销，数据库场景中“批量分配”多，之前 Chunk 的剩余空间难复用，不如优先保证分配速度。
+
+
+## 六、实操示例：跟着代码走一遍完整流程
+### 场景：查询中分配 3 次内存，最后释放
+```cpp
+// 1. 创建 MemPool（绑定 MemTracker，不强制二进制 Chunk 尺寸）
+MemTracker tracker;
+MemPool pool(&tracker, false);
+
+// 2. 第一次分配：100 字节（默认 8 字节对齐）
+// 流程：无 Chunk→分配 4KB 新 Chunk→当前活跃 Chunk=0→分配成功
+uint8_t* p1 = pool.Allocate(100);
+// 此时：chunks_ 有 1 个 Chunk（4KB），allocated_bytes=100，total_allocated_bytes_=100
+
+// 3. 第二次分配：4000 字节
+// 流程：当前 Chunk 剩 4096-100=3996 <4000→找空闲 Chunk（无）→分配新 Chunk（next_chunk_size_=8KB）
+uint8_t* p2 = pool.Allocate(4000);
+// 此时：chunks_ 有 2 个 Chunk（4KB、8KB），current_chunk_idx_=1，allocated_bytes=4000
+
+// 4. 第三次分配：200 字节
+// 流程：当前 Chunk 剩 8192-4000=4192 ≥200→直接分配
+uint8_t* p3 = pool.Allocate(200);
+// 此时：current_chunk_idx_=1，allocated_bytes=4200，total_allocated_bytes_=100+4200=4300
+
+// 5. 释放：查询结束，彻底释放所有内存
+pool.FreeAll();
+// 此时：chunks_ 为空，所有内存归还给系统
+```
+
+
+## 七、总结：MemPool 设计的 3 个核心要点
+1. **Chunk 池化**：用大 Chunk 承接小分配，减少系统调用，消除外部碎片；
+2. **动态适配**：Chunk 尺寸翻倍增长，接口支持对齐/非对齐/限制检查，适配数据库多样化需求；
+3. **场景优先**：不追求 100% 空间利用率，优先保证分配速度和内存可控性（数据库场景的核心诉求）。
+
+看完这个流程，就能明确 MemPool 从创建、分配、复用、转移到释放的全链路设计，以及每个环节的代码逻辑和设计权衡。
+
+
+*************************************************************************
+
+
 请解释：  /// A static field used as non-NULL pointer for zero length allocations. NULL is
   /// reserved for allocation failures. It must be as aligned as max_align_t for
   /// TryAllocateAligned().
@@ -1865,108 +2179,5 @@ Issue Links
 
 
 ******************************************
-
-
-WIP: IMPALA-13486: Support MemPool backed by BufferPool in parquet scanner
-
-MemPool is used as an Arena that pre-allocates memory chunks to save
-frequent calls on malloc() and free() from the thread. It's helpful
-especially for small objects that have a similar lifetime and fit into
-the pre-allocated chunks. However, when allocating a large memory space
-that no free chunks can fit, it still invokes malloc() to allocate the
-space.
-
-TCMalloc is used in Impala as the memory allocator. It has a ThreadCache
-for each thread to serve small allocations. However, for allocations
-larger than 256KB, they are served by the Central Cache of TCMalloc
-which has lock contention on its CentralFreeList.
-
-Currently, when scanner threads allocate large memory spaces from
-MemPool, they suffer from this TCMalloc contention. Performance degrades
-as concurrency increases.
-
-BufferPool is another memory management layer in Impala to handle memory
-reservation and spill-to-disk for all queries. It also enables reuse of
-buffers (memory spaces) between queries, to avoid frequent allocations.
-Allocating large buffers from BufferPool won't hit the above TCMalloc
-contention issue if the allocations can be served by previously freed
-buffers.
-
-This patch extends MemPool to be able to allocate memory chunks using
-BufferPool. A new constructor passing a BufferPool client is added to
-enable this mode. MemPool now manages a list of memory chunks allocated
-from malloc() and a list of buffers allocated from BufferPool. MemPools
-in different modes can acquire data from each other, by updating these
-two lists.
-
-ScratchTupleBatch is used in Parquet/ORC scanners to materialize tuples
-before evaluating filters. It currently has two MemPools, tuple_mem_pool
-and aux_mem_pool, for the fix-sized and var-len parts respectively.
-ParquetColumnChunkReader has a data_page_pool_ which allocates memory
-for decompressed/copied Parquet data pages. These three kinds of
-MemPools are where a scanner could allocate large memory space. They are
-now backed by BufferPool to avoid the above TCMalloc contention issue.
-
-Min reservation of the HdfsScanNode is increased for these allocation.
-
-----------
-Limitation
-
-When allocating memory from BufferPool, MemPool uses
-AllocateUnreservedBuffer() which might increase memory reservation in
-runtime to fit the space that used to be allocated from malloc(). This
-makes the query easier to hit OOM when it couldn't increase the
-reservation. Some tests that expect the query can run with the minimal
-reservation, i.e.
-DEBUG_ACTION="-1:OPEN:SET_DENY_RESERVATION_PROBABILITY@1.0", failed due
-to this.
-
-AllocateUnreservedBuffer() consumes memory reservation of the operator.
-When transferring data to downstream operators, the used reservation
-needs to be transferred together. This is a TODO item of this patch.
-It's a problem in MT_DOP=0, i.e. HdfsScanNode, since
-HdfsScanNode::ReturnReservationFromScannerThread() can't return the
-reservation requested for the scanner thread. Reservation that
-previously used by IO buffers might be used in the output RowBatch so
-can't be returned when the scanner thread is closed. No such problem in
-MT_DOP>0 where HdfsScanNode::ReturnReservationFromScannerThread() is not
-used. The current patch still uses the old MemPool mode when MT_DOP=0.
-
-TODO: test ORC scanner
-
-Change-Id: I7cf0eac43fa98cb4cff66e5061f5bb561487d6ab
-
-
-以下是你提供的内容的中文翻译：
-
----
-
-**WIP: IMPALA-13486：在 Parquet 扫描器中支持由 BufferPool 支持的 MemPool**
-
-MemPool 被用作一个 Arena（内存池），预先分配内存块以减少线程频繁调用 `malloc()` 和 `free()`。这对于生命周期相似、可以放入预分配块中的小对象尤其有用。然而，当需要分配较大的内存空间且没有可用块容纳时，它仍会调用 `malloc()` 进行分配。
-
-Impala 使用 TCMalloc 作为内存分配器。TCMalloc 为每个线程提供一个 ThreadCache 来处理小额分配。然而，对于大于 256KB 的分配，会由 TCMalloc 的 Central Cache 提供，该部分存在 CentralFreeList 的锁竞争问题。
-
-当前，在扫描器线程从 MemPool 分配大内存空间时，会遇到 TCMalloc 的竞争问题，随着并发度提升，性能会下降。
-
-BufferPool 是 Impala 中另一个内存管理层，负责所有查询的内存保留和落盘（spill-to-disk）。它还能实现不同查询之间对缓冲区（内存空间）的复用，以避免频繁分配。如果能由之前释放的缓冲区提供分配，则从 BufferPool 分配大缓冲区不会触发上述 TCMalloc 的竞争问题。
-
-本补丁扩展了 MemPool，使其能够通过 BufferPool 分配内存块。添加了一个新构造函数，允许传入 BufferPool 客户端以启用该模式。现在，MemPool 会管理两个列表：一个是通过 `malloc()` 分配的内存块列表，另一个是通过 BufferPool 分配的缓冲区列表。在不同模式下的 MemPool 实例可以通过更新这两个列表彼此获取数据。
-
-`ScratchTupleBatch` 用于 Parquet/ORC 扫描器中，在应用过滤器前对 tuple 进行实例化。它目前有两个 MemPool：`tuple_mem_pool` 和 `aux_mem_pool`，分别用于固定长度和变长部分。`ParquetColumnChunkReader` 有一个 `data_page_pool_`，用于分配解压/复制后的 Parquet 数据页内存。这三类 MemPool 是扫描器可能会分配大内存空间的地方。它们现在由 BufferPool 支持，从而避免了上述 TCMalloc 的竞争问题。
-
-为这些分配场景，`HdfsScanNode` 的最小内存保留值被提高。
-
----
-
-**限制**
-
-当从 BufferPool 分配内存时，MemPool 使用 `AllocateUnreservedBuffer()`，该方法可能在运行时增加内存保留量，以适应原本由 `malloc()` 分配的空间。这使得查询更容易因为无法增加内存保留而导致 OOM（内存溢出）。一些期望查询能够使用最小内存保留就能运行的测试因此失败，例如设置了 `DEBUG_ACTION="-1:OPEN:SET_DENY_RESERVATION_PROBABILITY@1.0"` 的测试。
-
-`AllocateUnreservedBuffer()` 会消耗操作符的内存保留。在将数据传递给下游操作符时，使用的保留也需要一并传递。这是本补丁中尚未完成的工作项。
-
-在 `MT_DOP=0`（即多线程并发度为 0，HdfsScanNode 单线程扫描）时，这是一个问题，因为 `HdfsScanNode::ReturnReservationFromScannerThread()` 无法返回为扫描线程请求的保留内存。之前由 IO 缓冲区使用的保留可能在输出 `RowBatch` 中仍然被使用，因此无法在关闭扫描线程时归还。而在 `MT_DOP>0` 时没有此问题，因为不会使用 `HdfsScanNode::ReturnReservationFromScannerThread()`。
-
-因此，在当前补丁中，当 `MT_DOP=0` 时仍使用旧的 MemPool 模式。
 
 *************************88
