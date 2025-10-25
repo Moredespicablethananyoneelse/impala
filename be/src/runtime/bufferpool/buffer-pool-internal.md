@@ -395,10 +395,20 @@ class BufferPool::Client {
        5.1：而CleanPages需要等到足够的page写出到磁盘。所以write_complete_cv_被通知以后，还需要检查条件（写出page个数）是否满足。
        5.2：这和我们通常while （） {condition.wait}避免虚假唤醒的机制不同(这个是真的唤醒)。相同的是都用了while
        5.3只有通过write_complete_cv_被唤醒后再次检测是否由足够的page将被写出（通过while循环）。另一个条件变量clean_pages_done_cv_才通知当前CleanPages完成。
-       5.4：也就是连续使用了两个条件变量BufferPool::Client::write_complete_cv_和BufferPool::Client::clean_pages_done_cv.
-       5.5 CleanPages是同步接口。由while循环和条件变量BufferPool::Client：：write_complete_cv_保证足够多的page已经被写出。由BufferPool::Client::clean_pages_done_cv_保证只有一个函数调用CleanPages.
-       5.5我们发现BufferPool::Client::lock_被三个条件变量使用：BufferPool::Page::write_compelete_cv_和BufferPool::Client::write_complete_cv和BufferPool::Client::clean_pages_done_cv_
- 
+       5.4：也就是连续使用了两个条件变量：   
+             BufferPool::Client::write_complete_cv_和BufferPool::Client::clean_pages_done_cv.
+       5.5 CleanPages是同步接口。
+           由while循环和条件变量BufferPool::Client：：write_complete_cv_保证足够多的page已经被写出。由BufferPool::Client::clean_pages_done_cv_保证只有一个函数调用CleanPages.
+       5.5我们发现BufferPool::Client::lock_被三个条件变量使用：   
+             BufferPool::Page::write_compelete_cv_和BufferPool::Client::write_complete_cv和BufferPool::Client::clean_pages_done_cv_
+          我以前没有讲过这种方式。
+       5.6：还有个指的学习的地方：
+          BufferPool::Client：：write_complete_cv_被两个两个函数调用wait：
+          5.6.1：void BufferPool::Client::WaitForAllWrites()中循环等待BufferPool::Client::in_flight_write_pages_为为空。
+          5.6.2：BufferPool::Client::CleanPages中循环等待足够多的page写出到磁盘
+          我以前没有注意过这种方式。
+        5.7：BufferPool::Client：：write_complete_cv_被一个两个函数调用notify_all。即void BufferPool::Client::WriteCompleteCallback(Page* page, const Status& write_status)；
+
 
 
   */
