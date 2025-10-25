@@ -104,7 +104,7 @@
 | `clean_page_hits_`        | `IntCounter* const`           | 正确大小干净页面驱逐次数。                                           | 是       | 构造函数注册 |
 | `num_scavenges_`          | `IntCounter* const`           | Scavenge 尝试次数。                                                  | 是       | 构造函数注册 |
 | `num_final_scavenges_`    | `IntCounter* const`           | 最终（全锁）scavenge 次数。                                          | 是       | 构造函数注册 |
-
+- **关键参数**： `buffer_sizes_`    的LOG_MAX_BUFFER_BYTES为48，也就是最大可分配281TB的buffer
 - **内存布局**：继承 `CacheLineAligned`，指标指针 const，确保线程安全读取。
 - **指标命名**：使用 `arena_name` 模板（如 "arena-0"），便于多 arena 区分。
 

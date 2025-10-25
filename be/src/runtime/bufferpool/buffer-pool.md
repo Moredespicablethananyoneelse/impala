@@ -1,6 +1,10 @@
 
-
+# BufferPool::Client
+[BufferPool::Client](./buffer-pool-internal.md)
 *****************************************************************************
+# BufferPool
+
+```cpp
 /// A buffer pool that manages memory buffers for all queries in an Impala daemon.
 /// 一个缓冲区池，用于管理Impala守护进程中所有查询的内存缓冲区。
 
@@ -192,8 +196,40 @@
 /// BufferHandle执行并发操作。
 /// same Client, PageHandle or BufferHandle.
 
+```
+********************************************************
+### BufferPool 类关键成员函数和成员变量
+
+实际上BufferPool没有提供任何功能。只是代理了其他BufferAllocator和BuffePool::Client的功能。
+     3：BufferPool中只有一个重要变量BufferAllocator；
+     4：BufferPool只是作为BufferAllocator和BufferPool::Client交互的粘合剂。向使用者提供一些简单的接口：
+     比如：1：注册/注销BufferPool::Client
+           2：CreatePinnedPage/Pin/Unpin/DestroyPage的page操作
+           3：AllocateBuffer/AllocateUnreservedBuffer/ExtractBuffer/FreeBuffer的Buffer操作
+           4：Maintaince/FreeToSystem
+     5: 这里有个关键问题。BufferPool：：Client如何与BufferPool交互？
+       正因为BufferPool只有一个重要的成员变量BufferAllocator.
+       所以BufferPool::Client和BufferAllocator的交互使用的以上BufferPool函数需要将BufferPool::Client作为入参，甚至将具体的某个Page作为入参。这样BufferPool才可以组织BufferPool::Client和BufferAllocator的交互。
+
+#### 关键成员变量
+这些变量定义 BufferPool 的核心状态和依赖。
+
+| 成员变量              | 类型                          | 访问修饰符 | 描述                                                                 | 关键性 |
+|-----------------------|-------------------------------|------------|----------------------------------------------------------------------|--------|
+| `allocator_`         | `boost::scoped_ptr<BufferAllocator>` | private   | 内部分配器，负责缓冲区分配/回收和 free/clean lists 管理。             | 高（核心依赖） |
+| `min_buffer_len_`    | `const int64_t`               | private   | 最小缓冲区大小（2 的幂次），所有缓冲/页面必须是其倍数。               | 高（配置基础） |
+
+- **总体**：成员变量简洁，主要依赖 allocator_ 处理复杂逻辑。无直接锁（借用子类 SpinLock/mutex）。
+
+
+#### 总结
+- **核心变量**：仅 2 个（allocator_ 和 min_buffer_len_），设计简洁，委托子类处理复杂性。
+
+
+
 
 *****************************************************************
+# BufferPool::ClientHandle 与 Client 的关系
 BufferPool::ClientHandle 与 Client 的关系是**“外部访问接口”与“内部核心实现”** 的绑定关系：Handle 是客户端操作 BufferPool 的“对外入口”，Client 是 BufferPool 内部管理客户端状态的“核心数据载体”，二者通过指针关联，共同实现“内外隔离、安全访问”的设计目标。
 
 
