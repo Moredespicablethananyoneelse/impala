@@ -150,12 +150,23 @@ FreeBufferArena(BufferAllocator* parent, MetricGroup* metrics, const std::string
 
 #### `pair<int64_t, int64_t> FreeSystemMemory(int64_t target_bytes_to_free, int64_t target_bytes_to_claim, std::unique_lock<SpinLock>* arena_lock)`
 - **描述**：释放至少 target_bytes_to_free 字节，
-    从后向前遍历当前BufferPool::FreeBufferArena的类型为PerSizeLists数组的buffer_sizes_（即按照buffer/page从大到小大小搜索）；
-    首先释放最大的PerSizeLists中的各个buffer，page。如果释放的还不够，继续释放稍小的PerSizeLists的buffer和page。
-    同一个PerSizeList中先看free_buffers够不够，如果不够，将clean_pages的各个page的buffer先转移一部分到free_buffers,然后统一通过free_buffers释放。
-    (最终由system_allocator_->Free(move(buffer))释放各个buffers)
+    - 从后向前遍历当前BufferPool::FreeBufferArena的类型为PerSizeLists数组的buffer_sizes_（即按照buffer/page从大到小大小搜索）；
+    - 首先释放最大的PerSizeLists中的各个buffer，page。如果释放的还不够，继续释放稍小的PerSizeLists的buffer和page。
+    - 同一个PerSizeList中先看free_buffers够不够，如果不够，将clean_pages的各个page的buffer先转移一部分到free_buffers,然后统一通过free_buffers释放。
+    - (最终由system_allocator_->Free(move(buffer))释放各个buffers)
     返回 (释放字节, 声明字节)。多余字节加回 system_bytes_remaining_。
-    如果 arena_lock 非空，通过传出参数arena_lock转移锁所有权给调用者。
+    - 如果 arena_lock 非空，通过传出参数arena_lock转移锁所有权给调用者。
+    - 解释函数中涉及的几个变量：
+       - bytes_freed：该函数运行期间累计已经释放的内存。
+       - buffer_len:当前遍历的PerSizeLists中free_buffers每个buffer的大小。
+       - buffers_to_free:当前遍历的PerSizeLists中的free_buffers需要释放buffer的个数。
+       - buffer_bytes_to_free：准备好释放的各个buffer的大小的和(包括从page中提取的buffer)。
+       - num_pages_evicted:在该PerSizeLists中的free_buffers不够的情况下，需要驱逐的page的个数。
+
+    - 如果释放的实际释放的内存bytes_freed > target_bytes_to_claim,
+    则只将bytes_freed - target_bytes_to_claim返回给所属BufferAllocator的system_bytes_remaininig_;
+
+
 
 #### `void AddCleanPage(Page* page)`
 - **描述**：添加干净页面到对应大小的PerSizeList的clean_pages；
@@ -173,6 +184,8 @@ FreeBufferArena(BufferAllocator* parent, MetricGroup* metrics, const std::string
 - **描述**：从小到大遍历PerSizeLists，释放每个 PerSizeLists的free_buffers：释放多少？（每个PerSizeList都有个low_water_mark指标，记录自上次调用Maintenance以来该PerSizeLists的free_buffers的最少个数）,释放 low_water_mark / 2 个缓冲区（至少 1 个），释放后重置 low_water_mark。
 由后台线程MemoryMaintenanceThread每10s中运行一次
 
+#### `pair<int64_t, int64_t> BufferPool::FreeBufferArena::FreeSystemMemory(int64_t target_bytes_to_free, int64_t target_bytes_to_claim,std::unique_lock<SpinLock>* arena_lock)`
+
 ### 5.2 集成点
 - **父级**：BufferAllocator 的 per_core_arenas_ 向量（unique_ptr），每个核心一个。
 - **子结构**：buffer_sizes_ 数组，每个 PerSizeLists 管理一种大小。
@@ -182,7 +195,7 @@ FreeBufferArena(BufferAllocator* parent, MetricGroup* metrics, const std::string
 
 此文档基于提供的实现，如需代码示例或 UML，请进一步指定！
 ******************************************************************************
-# BufferPool 类
+# BufferPool：：BufferAllocator 类
 /// BufferPool 内部使用的缓冲区分配器，用于分配 2 的幂次大小的缓冲区。
 /// BufferAllocator 在 SystemAllocator 的基础上构建，添加了对空闲缓冲区的缓存
 /// 和干净页面的缓存，其中内存当前未被客户端使用，但尚未释放回 SystemAllocator。
@@ -321,6 +334,9 @@ class BufferPool::BufferAllocator {
 
   /// Frees 'buffer', which must be open before calling. Closes 'buffer' and updates
   /// internal state but does not release to any reservation.
+  /*
+       将buffer回收到对应core的FreeBufferArena，即FreeBufferArena对应大小的PerSizeLists的free_buffers列表
+  */
   void Free(BufferPool::BufferHandle&& buffer);
 
 
@@ -346,6 +362,12 @@ class BufferPool::BufferAllocator {
   void Maintenance();
 
   /// Try to release at least 'bytes_to_free' bytes of memory to the system allocator.
+  /*
+    尝试释放最少bytes_to_free大小的内存给systemAllocator
+    会从当前core开始逐个遍历所有core的FreeBufferArena。
+    调用每个FreeBuferArena::freeSystemMemory,
+    直到释放buffer大小达到bytes_to_free结束
+   */
   void ReleaseMemory(int64_t bytes_to_free);
 
   int64_t system_bytes_limit() const { return system_bytes_limit_; }
@@ -409,11 +431,14 @@ class BufferPool::BufferAllocator {
   /// but can block progress of other threads for longer. If 'slow_but_sure' is false,
   /// then this function optimistically tries to reclaim the memory but may not reclaim
   /// 'target_bytes' of memory. Returns the number of bytes reclaimed.
-  /// 见后文专门讨论
+  [见后文专门讨论](#scavengebuffers)
   int64_t ScavengeBuffers(bool slow_but_sure, int current_core, int64_t target_bytes);
 
 
   /// Helper to free a list of buffers to the system. Returns the number of bytes freed.
+  /*
+    通过system_allocator_->Free(move(buffer));释放输入参数buffers的每个buffer。每个buffer的区域取消毒化
+  */
   int64_t FreeToSystem(std::vector<BufferHandle>&& buffers);
 
   /// Compute a sum over all arenas. Does not lock the arenas.
@@ -471,6 +496,7 @@ class BufferPool::BufferAllocator {
 };
 ```
 ****************************************************************************************************
+# ScavengeBuffers
 ### 这段代码是否只清理当前核心？
 
 **不是**。这段 slow path（scavenge 回收）代码**会遍历并清理所有核心（arenas）的空闲缓冲区和干净页面**，而非仅限于当前核心（current_core）。它通过调用 `ScavengeBuffers` 实现全局回收，确保在必要时从整个系统范围内释放内存。下面我一步步解释为什么，以及实现细节，帮助你理解。
@@ -636,3 +662,4 @@ if (delta == len) {
 - **潜在 bug**：如果 scavenge 失败（delta < len），是会计错误（e.g., 预留超限）——检查 ReservationTracker。
 
 如果这个解释还不够清晰，或想分析 ScavengeBuffers 内部，我可以继续深挖！
+*************************************************************

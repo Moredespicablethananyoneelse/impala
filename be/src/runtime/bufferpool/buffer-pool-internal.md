@@ -1,5 +1,10 @@
-```cpp
+# BufferAllocator
+[Class BuferAllocator](./buffer-allocator.md)
+-------------------------------------------
 
+# BufferPool
+
+```cpp
 // 此文件包含缓冲池内部使用的类定义。
 //
 /// +========================+
@@ -207,12 +212,25 @@ class BufferPool::Client {
   /// 调用者不应持有客户端的锁或 handle->page_->buffer_lock。
   void DestroyPageInternal(PageHandle* handle, BufferHandle* out_buffer = NULL);
 
-  /// 更新客户端状态以反映 'page' 现在是脏未固定页面。可能
-  /// 为此或其他脏未固定页面启动写入。
+  /// 将page从pinned_pages移动到dirty_unpinned_pages_队列中以反映 'page' 现在是脏未固定页面。
+  /// 调用异步函数WriteDirtyAsync将dirty_unpinned_pages写到磁盘的。
+  /// 至于是否有dirty_unpinned_pages被写到磁盘，看当前内存使用状态。
   /// 调用者不应持有客户端的锁或 page->buffer_lock。
+  ///  注意学习：page从一个队列移动到另一个队列时，只使用了BufferPool::Client一个锁。
+  ///  也就是一个锁保护了两个队列。
   void MoveToDirtyUnpinned(Page* page);
 
-  /// 将未固定页面移动到固定状态，在数据结构之间移动并
+  /// 将未固定页面移动到固定状态，在数据结构之间移动：
+         如果page在dirty_unpinned_pages中：
+            将该page从diry_unpinned_pages移动到pinned_pages。
+        如果page在in_flight_write_pages中：
+             等待该page写操作完成（完成后该page在BufferPool::BufferAllocator的某个core的PerSizeLists中的clean_pages里）。
+             我们将在上述clean_pages中的page移动到pinned_pages前，需要通过cleanPages保证当前BufferPool::Client有page->len的空间。
+             即dirty_unpinned_pages_只能保留 int64_t target_dirty_bytes = reservation_.GetReservation() - buffers_allocated_bytes_- pinned_pages_.bytes() - len;大小。多余的diryty_unpinned_pages都要通过
+              WriteDirtyPagesAsync(min_bytes_to_write)写到磁盘。
+            dirty_unpinned_pages能保留多少page原则：来自 eviction policy（不变量）：reservation >= buffers + pinned + dirty（unpinned/in-flight）。
+
+
   /// 如果必要从磁盘读取。确保页面有缓冲区。如果数据已在
   /// 内存中，确保数据在页面的缓冲区中。如果数据在
   /// 磁盘上，启动异步读取数据并将页面的 'pin_in_flight' 设置
@@ -314,9 +332,21 @@ class BufferPool::Client {
   /// 更积极地启动写入，以便 I/O 和计算可以重叠。如果
   /// 遇到任何错误，则设置 'write_status_'。因此
   /// 在读取回任何页面之前必须检查 'write_status_'。调用者必须持有 'lock_'。
+  /*
+      1:至少写出min_bytes_to_write字节，同时启动至少磁盘个数个TmpFileGroup::Write异步写操作。
+      2:同时这个函数只启动异步写（TmpFileGroup::write)，而不等待异步写完成。
+      3:补充一句，TmpFileGroup写出的page，在TmpFileGroup::write指定的回调函数中将in_flight_write_pages已经完成写操作的page移动到BufferPool::BufferAllocator对应core的FreeArena的对应大小PerSizeLists中的clean_pages中。
+      4： WriteDirtyPagesAsync是由函数MoveToDirtyUnpinned 或 CleanPages调用的。
+        WriteDiryPageAsync一经调用，dirty_unpinned_pages_ 会持续异步写到磁盘（即使后续不调用 moveToDirtyUnpinned 或 CleanPages），直到dirty_unpinned_pages_为空为止。
+        Impala BufferPool 的 spilling（溢出）机制设计为异步、链式（递归）驱动的，一旦 MoveToDirtyUnpinned 或 CleanPages 被调用并触发写操作，脏未固定页面（dirty_unpinned_pages_）就会持续通过 TmpFileGroup::Write 异步写入磁盘，直到没有更多脏页可写（因为每个TmpFileGroup::write的回调函数会在每个page被写完的回调函数继续调用WriteDirtyPagesAsync）。这不是“一次性”操作，而是自我维持的循环，目的是最大化 I/O 重叠和磁盘利用率。
+  */
   void WriteDirtyPagesAsync(int64_t min_bytes_to_write = 0);
 
-  /// 当 'page' 的写入完成时调用。
+  /* 1：TmpFileGroup::write的回调函数，当 'page' 的写入完成时调用。
+      将page从BufferPool::Client::in_flight_write_pages移动到BufferPool::BufferAllocator对应core的FreeArena的对应大小PerSizeLists中的clean_pages中。
+    2：继续调用WriteDirtyPagesAsync(); 启动另一个异步写操作。
+    3：通知page和BufferPool::Client各自的write_complete_cv_
+  */
   void WriteCompleteCallback(Page* page, const Status& write_status);
 
   /// 通过分配新缓冲区、启动从磁盘的异步读取并将页面移动到 'pinned_pages_' 将驱逐页面移动到固定状态。调用者必须通过 'client_lock' 锁定 client->impl，并且 handle->page 必须解锁。
@@ -351,9 +381,27 @@ class BufferPool::Client {
   std::mutex lock_;
 
   /// 当此客户端的写入完成时信号的条件变量。
+  /*
+        5.3:这个BufferPool::Client::write_complete_cv_配合BufferPool::Client::lock_使用；
+  */
   ConditionVariable write_complete_cv_;
 
-  /// 用于确保 CleanPages() 中一次只有一个线程活跃。
+  /*1：用于确保 CleanPages() 中一次只有一个线程活跃。
+    2：CleanPages函数通常只指定需要腾出多少空间，
+    所以CleanPages可能最终会写多个page到磁盘（写出到磁盘的page会从BufferPool::Client的in_flight_write_pages移动到BufferPool::BufferAllocator的某个core的FreeBufferArena的某个size的PerSizeLists中的clean_pages中）
+    3：所以CleanPages是批量写出pages
+    4：CleanPages是同步接口，所以调用了WriteDirtyPagesAsync后，需要条件变量clean_pages_done_cv_进行同步
+    5：因为WriteDiryPagesAsync调用的TmpFileGroup::write每个page写成功后的回调函数都会通知这个write_complete_cv_也会通知page自己的write_complete_cv_）。
+       5.1：而CleanPages需要等到足够的page写出到磁盘。所以write_complete_cv_被通知以后，还需要检查条件（写出page个数）是否满足。
+       5.2：这和我们通常while （） {condition.wait}避免虚假唤醒的机制不同(这个是真的唤醒)。相同的是都用了while
+       5.3只有通过write_complete_cv_被唤醒后再次检测是否由足够的page将被写出（通过while循环）。另一个条件变量clean_pages_done_cv_才通知当前CleanPages完成。
+       5.4：也就是连续使用了两个条件变量BufferPool::Client::write_complete_cv_和BufferPool::Client::clean_pages_done_cv.
+       5.5 CleanPages是同步接口。由while循环和条件变量BufferPool::Client：：write_complete_cv_保证足够多的page已经被写出。由BufferPool::Client::clean_pages_done_cv_保证只有一个函数调用CleanPages.
+       5.5我们发现BufferPool::Client::lock_被三个条件变量使用：BufferPool::Page::write_compelete_cv_和BufferPool::Client::write_complete_cv和BufferPool::Client::clean_pages_done_cv_
+ 
+
+
+  */
   bool cleaning_pages_ = false;
   ConditionVariable clean_pages_done_cv_;
 
@@ -378,12 +426,17 @@ class BufferPool::Client {
   /// 此客户端的所有固定页面。
   PageList pinned_pages_;
 
-  /// 此客户端的脏未固定页面，对于这些页面写入未进行中。页面
-  /// 写入按 LIFO 顺序启动，因为操作符通常具有顺序访问
-  /// 模式，其中最近驱逐的页面将是最后读取的。
+  /* 此客户端的脏未固定页面，这些page的还没有开始异步写到磁盘。
+     正在进行异步写出到磁盘的page会放在in_flight_write_pages中。
+     对于ile_group_==nullptr，也就是禁用spilling的BufferPool::Client的dirty_unpinned_pages_一定是空的
+   */
   PageList dirty_unpinned_pages_;
 
-  /// 此客户端的脏未固定页面，对于这些页面写入进行中。
+  /* 此客户端的脏未固定页面，正在进行异步写到磁盘的页面，
+     从队列尾部开始遍历写出到磁盘，也就是LIFO方式
+      因为操作符通常具有顺序访问
+      模式，其中最近驱逐的页面将是最后读取的。
+  */
   PageList in_flight_write_pages_;
 };
 }
