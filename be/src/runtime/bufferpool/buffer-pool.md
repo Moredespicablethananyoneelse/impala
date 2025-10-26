@@ -1,6 +1,6 @@
 
 # BufferPool::Client
-[BufferPool::Client](./buffer-pool-internal.md)
+[BufferPool::Client/BufferPool::Page](./buffer-pool-internal.md)
 *****************************************************************************
 # BufferPool
 
@@ -201,13 +201,14 @@
 ### BufferPool 类关键成员函数和成员变量
 
 实际上BufferPool没有提供任何功能。只是代理了其他BufferAllocator和BuffePool::Client的功能。
-     3：BufferPool中只有一个重要变量BufferAllocator；
-     4：BufferPool只是作为BufferAllocator和BufferPool::Client交互的粘合剂。向使用者提供一些简单的接口：
-     比如：1：注册/注销BufferPool::Client
-           2：CreatePinnedPage/Pin/Unpin/DestroyPage的page操作
-           3：AllocateBuffer/AllocateUnreservedBuffer/ExtractBuffer/FreeBuffer的Buffer操作
-           4：Maintaince/FreeToSystem
-     5: 这里有个关键问题。BufferPool：：Client如何与BufferPool交互？
+  - BufferPool中只有一个重要变量BufferAllocator；
+  - BufferPool只是作为BufferAllocator和BufferPool::Client交互的粘合剂。向使用者提供一些简单的接口：
+     比如：
+      - 1：注册/注销BufferPool::Client
+      - 2：CreatePinnedPage/Pin/Unpin/DestroyPage的page操作
+      - 3：AllocateBuffer/AllocateUnreservedBuffer/ExtractBuffer/FreeBuffer的Buffer操作
+      - 4：Maintaince/FreeToSystem
+- 有个关键问题。BufferPool：：Client如何与BufferPool交互？
        正因为BufferPool只有一个重要的成员变量BufferAllocator.
        所以BufferPool::Client和BufferAllocator的交互使用的以上BufferPool函数需要将BufferPool::Client作为入参，甚至将具体的某个Page作为入参。这样BufferPool才可以组织BufferPool::Client和BufferAllocator的交互。
 
@@ -1104,3 +1105,266 @@ Status BufferPool::Client::PrepareToAllocateBuffer(int64_t len, bool reserved, b
 - **设计意图**：确保内存分配安全，优化并发和性能，满足 Impala 高吞吐量需求。
 
 如果你有特定侧重点（例如与 `CleanPages` 的深入对比、内存预留的细节，或其他函数分析如 `CreatePinnedPage`），请告诉我，我会提供更针对性的解释！
+*********************************************************
+### Impala BufferPool 相关类内存使用限制总结
+
+Impala BufferPool 的内存管理设计强调**分层限制**：从全局（BufferPool）到分配器（BufferAllocator）、arena（FreeBufferArena）和客户端（Client），通过预留（ReservationTracker）、剩余字节（AtomicInt64）和 eviction policy 强制执行。限制确保公平共享、避免 OOM，并支持 spilling（溢出到磁盘）。下面按类总结关键限制机制，包括变量、作用和执行方式（基于代码不变量）。
+
+#### 1. **BufferPool**（全局缓冲池）
+- **buffer_bytes_limit**（构造函数参数，int64_t）：
+  - **作用**：系统总物理内存上限（从 OS 分配的总字节）。如果不是min_buffer_len_ 倍数，buffer_bytes_limit % min_buffer_len_这个余数大小的内存不可用。
+  - **执行**：传递给 BufferAllocator::system_bytes_limit_；分配的内存不能超过该值，超过时 BufferAllocator：：Allocate 会失败。
+- **clean_page_bytes_limit**（构造函数参数，int64_t）：
+  - **作用**：跨所有 arena 的干净页面（clean pages）缓存上限（已写入磁盘,但尚保留在BufferPool::BufferAllocator各个core的FreeBufferArena的所有PerSizeLists中的clean_pages页面字节上限， 如果跨所有arena的clean pages超过这个上限，就会evict某些干净页面）。
+  - **执行**：传递给 BufferAllocator；AddCleanPage 时 Decrement clean_page_bytes_remaining_，不足时 FIFO 驱逐。
+- **min_buffer_len**（const int64_t）：
+  - **作用**：最小缓冲/页面大小（2 的幂次），所有分配必须其倍数。默认是8k
+  - **执行**：DCHECK 验证；AllocateBuffer 时强制 RoundUpToPowerOfTwo(len)。
+
+#### 2. **BufferAllocator**（内部分配器）
+- **system_bytes_limit_**（const int64_t）：
+  - **作用**：系统分配总上限（= BufferPool::buffer_bytes_limit）。
+  - **执行**：AllocateInternal 时检查 len <= limit；由原子变量 system_bytes_remaining_ 跟踪可用大小（初始 = limit）。
+- **clean_page_bytes_limit_**（const int64_t）：
+  - **作用**：干净页面总缓存上限（= BufferPool::clean_page_bytes_limit）。
+  - **执行**：AddCleanPage 时 Decrement clean_page_bytes_remaining_，不足时 FreeBufferArena::AddCleanPage 驱逐 FIFO。
+- **system_bytes_remaining_**（AtomicInt64）：
+  - **作用**：当前剩余系统可用字节（动态跟踪）。
+  - **执行**：AllocateInternal Decrement（CAS 循环）；Free/ScavengeBuffers Increment；
+    ```cpp
+     static int64_t DecreaseBytesRemaining(int64_t max_decrease, bool require_full_decrease, AtomicInt64* bytes_remaining) {
+        while (true) {
+          int64_t old_value = bytes_remaining->Load();  // 读当前值
+          if (require_full_decrease && old_value < max_decrease) return 0;  // 不足 max_decrease，不扣减
+          int64_t decrease = min(old_value, max_decrease);  // 实际扣减量
+          int64_t new_value = old_value - decrease;
+          if (bytes_remaining->CompareAndSwap(old_value, new_value)) {  // CAS 成功扣减
+            return decrease;
+        }
+        // CAS 失败，重试（并发冲突）
+      }
+    }
+   ```
+   - 也就是说，两种工作模式：
+        - 要么不分配，要么分配max_decrease
+        - byte_remaining不够分配时，能分配多少分配多少，总之不会使得system_bytes_remaining_ <0;
+  - 什么时候调用 scavenge 回收。
+
+- **max_buffer_len_**（const int64_t, CalcMaxBufferLen 计算）：
+    ```cpp
+      int64_t BufferPool::BufferAllocator::CalcMaxBufferLen(
+      int64_t min_buffer_len, int64_t system_bytes_limit) {
+      // Find largest power of 2 smaller than 'system_bytes_limit'.
+      int64_t upper_bound = system_bytes_limit == 0 ? 1L : 1L
+          << BitUtil::Log2Floor64(system_bytes_limit);
+      // MAX_BUFFER_BYTES 是2的48次方，大概281TB
+      upper_bound = min(MAX_BUFFER_BYTES, upper_bound);
+      return max(min_buffer_len, upper_bound); // Can't be < min_buffer_len.
+    }
+
+    ```
+  - **作用**：最大单缓冲大小（min(limit 的 log2 幂次, MAX_BUFFER_BYTES)）。
+  - **执行**：Allocate 时 len > max 失败。
+
+#### 3. **FreeBufferArena**（per-core arena）
+- **clean_page_bytes_remaining_**（通过 BufferPool::BufferAllocator::parent_ 间接获取该值，AtomicInt64）：
+  - **作用**：FreeBufferArena 没有自己的 clean_page_bytes_remaining_ 属性，它只是通过 parent_（BufferAllocator）间接访问全局的 clean_page_bytes_remaining_。这个变量是 BufferAllocator 级别的全局剩余配额（不是 per-arena 的“子集”），用于跨所有 arena 的干净页面缓存控制。
+
+- **low_water_mark**（per PerSizeLists, int）：
+  - **作用**：自上次 Maintenance() 的 free_buffers 最小大小，用于收缩阈值。
+  - **执行**：Maintenance() 释放 low_water_mark / 2 个缓冲（至少 1）
+
+#### 4. **Client**（客户端状态）
+- **reservation_limit**（构造函数参数，通过 ReservationTracker）：
+  - **作用**：客户端预留上限（InitChildTracker 设置）。
+  - **执行**：IncreaseReservationToFit/CheckStatus；超过时失败。
+- **buffers_allocated_bytes_**（int64_t）：
+  - **作用**：已分配给客户端的缓冲字节总和（从 AllocateBuffer/ExtractBuffer）。
+  - **执行**：FreedBuffer -= len；PrepareToAllocateBuffer += len；DCheckConsistency 验证 >=0。
+- **eviction policy 不变量**（隐式，通过 CleanPages）：
+  - **作用**：`reservation >= buffers_allocated_bytes_ + pinned_pages_.bytes() + dirty_unpinned_pages_.bytes() + in_flight_write_pages_.bytes()`。
+  - **执行**：CleanPages 计算 target_dirty_bytes，while 等待写完成（dirty + in-flight <= target）；WriteDirtyPagesAsync 启动异步写（min_bytes_to_write = dirty - target）。
+
+#### 5. 整体执行机制总结
+- **分层强制**：
+- **回收触发**：内存紧时，CleanPages/ScavengeBuffers 写脏页/释放 free buffers；Maintenance 定期收缩。
+- **不变量检查**：。
+
+
+这些限制确保 Impala 在多查询并发下稳定，避免单客户端独占内存。如果需要某个类的深挖，我可以扩展！
+
+
+----------------------------------------------------
+--------------------------------------------
+# BufferPool::BufferAllocator::ScavengeBuffer
+   清扫操作的顺序：
+   工作模式：
+   - slot_but_sure:
+     从0号core开始，逐core调用FreeBufferArena::FreeSystemMemory(bytes_needed, bytes_needed,
+         &arena_locks[i])
+   - !slot_but_sure:
+     从当前线程的core的,逐core调用
+     FreeBufferArena::FreeSystemMemory(bytes_needed, bytes_needed,nullptr)
+-----------------------------------
+# BufferPool::FreeBufferArena::FreeSystemMemor
+  从最大的块的buffer和clean_pages开始释放。
+  （clean_pages的buffer会首先移动到free_buffers中，然后通过清理free_buffers时统一删除）
+  ```cpp
+  // Search from largest to smallest to avoid freeing many small buffers unless
+  // necessary.
+  for (int i = NumBufferSizes() - 1; i >= 0; --i) {
+    PerSizeLists* lists = &buffer_sizes_[i];
+    int64_t buffer_bytes_freed =
+          parent_->FreeToSystem(free_buffers->GetBuffersToFree(buffers_to_free));
+  }
+ 
+  ```
+  --------------------------------------
+  # FreeList清理buffer的顺序
+
+  /// Get the 'num_buffers' buffers with the highest memory address from the list to
+  /// free. The average time complexity is n log n, where n is the current size of the
+  /// list.
+  // 按照地址从高到低的顺序获取空闲buffer，时间复杂度时nlogn（n为free buffer的个数）
+  // 目的是为了让释放回去的地址集中在高地址空间便于减少内存碎片
+  vector<BufferHandle> GetBuffersToFree(int64_t num_buffers) {
+    vector<BufferHandle> buffers;
+    std::sort(free_list_.begin(), free_list_.end(), SortCompare);
+
+    for (int64_t i = 0; i < num_buffers; ++i) {
+      buffers.emplace_back(std::move(free_list_.back()));
+      free_list_.pop_back();
+    }
+    return buffers;
+  }
+
+
+----------------------------------------------
+# clean_pages的清理顺序
+以FIFO的方式剔除BufferPool::BufferAllocator某个core的FreeBufferArena的clean_pages中的page。
+注意这里是BufferAllocator，所以是整个系统层级的clean_pages的回收顺序。
+```cpp
+Class PerSizeLists {
+
+    /// Unpinned pages that have had their contents written to disk. These pages can be
+    /// evicted to reclaim a buffer for any client. Pages are evicted in FIFO order,
+    /// so that pages are evicted in approximately the same order that the clients wrote
+    /// them to disk. Protected by FreeBufferArena::lock_.
+    InternalList<Page> clean_pages;
+};
+
+一个有两个函数会evict clean pages：
+
+void BufferPool::FreeBufferArena::AddCleanPage(Page* page) {
+  bool eviction_needed = DecreaseBytesRemaining(
+        page->len, true, &parent_->clean_page_bytes_remaining_) == 0;
+  lock_guard<SpinLock> al(lock_);
+  PerSizeLists* lists = GetListsForSize(page->len);
+  DCHECK_EQ(lists->num_clean_pages.Load(), lists->clean_pages.size());
+  if (eviction_needed) {
+    if (lists->clean_pages.empty()) {
+      // No other pages to evict, must evict 'page' instead of adding it.
+      lists->AddFreeBuffer(move(page->buffer));
+    } else {
+      // Evict an older page (FIFO eviction) to make space for this one.
+      Page* page_to_evict = lists->clean_pages.Dequeue();
+      lists->clean_pages.Enqueue(page);
+      BufferHandle page_to_evict_buffer;
+      {
+        lock_guard<SpinLock> pl(page_to_evict->buffer_lock);
+        page_to_evict_buffer = move(page_to_evict->buffer);
+      }
+      lists->AddFreeBuffer(move(page_to_evict_buffer));
+    }
+  } else {
+    lists->clean_pages.Enqueue(page);
+    lists->num_clean_pages.Add(1);
+  }
+}
+
+
+pair<int64_t, int64_t> BufferPool::FreeBufferArena::FreeSystemMemory(
+    int64_t target_bytes_to_free, int64_t target_bytes_to_claim,
+    std::unique_lock<SpinLock>* arena_lock) { 
+  // Search from largest to smallest to avoid freeing many small buffers unless
+  // necessary.
+  for (int i = NumBufferSizes() - 1; i >= 0; --i) {
+    PerSizeLists* lists = &buffer_sizes_[i];
+    FreeList* free_buffers = &lists->free_buffers;
+    InternalList<Page>* clean_pages = &lists->clean_pages;
+
+    // Figure out how many of the buffers in the free list we should free.
+    DCHECK_GT(target_bytes_to_free, bytes_freed);
+    const int64_t buffer_len = 1L << (i + parent_->log_min_buffer_len_);
+    int64_t buffers_to_free = min(free_buffers->Size(),
+        BitUtil::Ceil(target_bytes_to_free - bytes_freed, buffer_len));
+    int64_t buffer_bytes_to_free = buffers_to_free * buffer_len;
+    // Evict clean pages by moving their buffers to the free page list before freeing
+    // them. This ensures that they are freed based on memory address in the expected
+    // order.
+    while (bytes_freed + buffer_bytes_to_free < target_bytes_to_free) {
+      Page* page = clean_pages->Dequeue();
+      BufferHandle page_buffer;
+      {
+        page_buffer = move(page->buffer);
+      }
+      free_buffers->AddFreeBuffer(move(page_buffer));
+    }
+  }
+
+  return make_pair(bytes_freed, bytes_claimed);
+}
+
+```
+---------------------------------------------
+# BufferPool::Client中dirty_unpinned_pages_写出顺序
+  以LIFO的方式异步写出
+```cpp
+class BufferPool::Client {
+    /// Dirty unpinned pages for this client for which writes are not in flight. Page
+  /// writes are started in LIFO order, because operators typically have sequential access
+  /// patterns where the most recently evicted page will be last to be read.
+  PageList dirty_unpinned_pages_;
+}
+```
+
+***************************************************
+### BufferPool 中 BufferPool::Client::CleanPages 和 BufferPool::BufferAllocator::ScavengeBuffers 的调用时机总结
+
+Impala BufferPool 的内存释放设计是**分层渐进**的：`CleanPages` 聚焦 per-client 脏页清理（spilling 到磁盘），`ScavengeBuffers` 聚焦全局缓冲复用/回收（free/clean lists）。两者都用于“腾空间”，但触发点、作用域和阻塞性不同。下面我结合代码，总结调用时机、条件和逻辑。
+
+#### 1. **Status BufferPool::Client::CleanPages(unique_lock<mutex>* client_lock, int64_t len, bool lazy_flush)**
+- **作用**：清理客户端的脏未固定页面（dirty_unpinned_pages_），通过异步写到磁盘（WriteDirtyPagesAsync）减少脏字节，确保 eviction policy（预留 >= 使用）。len 是腾空间目标（e.g., 新缓冲大小）。lazy_flush=true 时，只写必要页，不报写错误。
+- **阻塞性**：**部分阻塞**（while 等待写完成，直到 dirty + in-flight <= target_dirty_bytes）。
+- **调用时机**：**客户端本地操作前**，当预留/分配需腾空间时。总是持 client_lock_ 调用。
+  - **直接调用者**：
+    - `Client::PrepareToAllocateBuffer`：分配缓冲前（reserved/false），计算 min_bytes_to_write = dirty - (reservation - buffers - pinned - len)，确保分配后 policy 满足。
+    - `Client::DecreaseReservationTo`：减少预留前，腾 amount_to_free 空间（max_decrease 限）。
+    - `Client::TransferReservationTo`：转移预留前，lazy_flush=true，腾 bytes 空间（避免错误传播）。
+  - **间接调用者**（通过 StartMoveToPinned 等）：
+    - `Client::StartMoveToPinned`：Pin 时，如果需回收 clean page，调用 CleanPages(page->len)。
+- **触发条件**：脏页字节 + in-flight > target_dirty_bytes（policy 违反），或需写 min_bytes_to_write。
+- **示例流程**：AllocateBuffer → PrepareToAllocateBuffer → CleanPages（写脏页） → Allocate。
+
+#### 2. **int64_t BufferPool::BufferAllocator::ScavengeBuffers(bool slow_but_sure, int current_core, int64_t target_bytes)**
+- **作用**：全局回收空间（target_bytes），遍历所有 arenas，释放 free_buffers（GetBuffersToFree，高地址优先）和 clean_pages（Dequeue FIFO，移动 buffer 到 free_buffers,然后统一通过free_buffers释放）。slow_but_sure=true 时全锁 arenas 保证成功（防竞态）。返回回收字节。
+- **阻塞性**：**非阻塞**（opportunistic 模式）；锁定模式持锁但不等 I/O（仅 Decrement remaining）。
+- **调用时机**：**全局分配慢路径**，当剩余空间不足时。多次调用（3 次），从当前核心优先。
+  - **直接调用者**：
+    - `BufferAllocator::AllocateInternal` 的 slow path：while 循环中 `delta += ScavengeBuffers(final_attempt, current_core, len - delta)`，回收 len - delta 空间。
+  - **触发条件**：DecreaseBytesRemaining 返回 0（remaining_ < len），且 NUMA PopFreeBuffer/EvictCleanPage 失败。
+- **示例流程**：AllocateInternal → DecreaseBytesRemaining 失败 → NUMA 失败 → while (3 次) ScavengeBuffers（回收） → 系统分配。
+
+#### 区别与共同点
+| 方面          | CleanPages                                      | ScavengeBuffers                                 |
+|---------------|-------------------------------------------------|-------------------------------------------------|
+| **作用域**   | per-client（脏页写磁盘 → clean）。              | 全局（free/clean lists 回收 → 系统）。          |
+| **触发点**   | 客户端操作前（分配/减少/转移预留）。            | 全局分配失败（remaining_ < len）。              |
+| **阻塞**     | 部分（等待写完成）。                            | 非（异步回收）。                                |
+| **空间目标** | 减脏页 <= target_dirty_bytes（policy）。        | 增 remaining_ >= target_bytes。                 |
+| **调用频率** | 客户端级（e.g., 每个 AllocateBuffer）。         | 全局级（分配慢路径，罕见）。                    |
+| **共同**     | 都腾空间；依赖 eviction policy；异步 I/O 重叠。 |                                                 |
+
+**设计意图**：CleanPages 确保本地 policy（客户端不阻塞 I/O）；ScavengeBuffers 确保全局可用（预留保证）。如果两者不足，Allocate 失败（INTERNAL_ERROR）。
+
+如果需要流程图或示例调用栈，我可以补充！

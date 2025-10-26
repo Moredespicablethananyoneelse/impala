@@ -2,7 +2,8 @@
 [Class BuferAllocator](./buffer-allocator.md)
 -------------------------------------------
 
-# BufferPool
+# BufferPool::Page
+# BufferPool::Client
 
 ```cpp
 // 此文件包含缓冲池内部使用的类定义。
@@ -250,6 +251,12 @@ class BufferPool::Client {
        所以BufferPool::Client和BufferAllocator的交互使用的以上BufferPool函数需要将BufferPool::Client作为入参，甚至将具体的某个Page作为入参。这样BufferPool才可以组织BufferPool::Client和BufferAllocator的交互。
 
      BufferPool中有
+  */
+  /*
+    1：如果page在dirty_unpinned_pages_中，将page从dirty_unpinned_pages_移动到pinned_pages_;
+    2: 如果page在in_flight_write_pages中（正在被异步写出），等待page写操作完成。
+      2.1：调用cleanPages腾出至少page->len大小的空间。
+          在每次分配或者从page回收一个buffer前都需要调用cleanPages函数，将dirty_unpinned_pages中必要的page（腾出len大小空间）都写到磁盘。以保证buffer pool内部的invariants（不变量）
   */
   Status StartMoveToPinned(ClientHandle* client, Page* page) WARN_UNUSED_RESULT;
 

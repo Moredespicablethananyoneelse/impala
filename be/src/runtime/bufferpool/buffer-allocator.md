@@ -663,3 +663,135 @@ if (delta == len) {
 
 如果这个解释还不够清晰，或想分析 ScavengeBuffers 内部，我可以继续深挖！
 *************************************************************
+--------------------------------------------
+# BufferPool::BufferAllocator::ScavengeBuffer
+   清扫操作的顺序：
+   工作模式：
+   - slot_but_sure:
+     从0号core开始，逐core调用FreeBufferArena::FreeSystemMemory(bytes_needed, bytes_needed,
+         &arena_locks[i])
+   - !slot_but_sure:
+     从当前线程的core的,逐core调用
+     FreeBufferArena::FreeSystemMemory(bytes_needed, bytes_needed,nullptr)
+-----------------------------------
+# BufferPool::FreeBufferArena::FreeSystemMemor
+  从最大的块的buffer和clean_pages开始释放。
+  （clean_pages的buffer会首先移动到free_buffers中，然后通过清理free_buffers时统一删除）
+  ```cpp
+  // Search from largest to smallest to avoid freeing many small buffers unless
+  // necessary.
+  for (int i = NumBufferSizes() - 1; i >= 0; --i) {
+    PerSizeLists* lists = &buffer_sizes_[i];
+    int64_t buffer_bytes_freed =
+          parent_->FreeToSystem(free_buffers->GetBuffersToFree(buffers_to_free));
+  }
+ 
+  ```
+  --------------------------------------
+  # FreeList清理buffer的顺序
+
+  /// Get the 'num_buffers' buffers with the highest memory address from the list to
+  /// free. The average time complexity is n log n, where n is the current size of the
+  /// list.
+  // 按照地址从高到低的顺序获取空闲buffer，时间复杂度时nlogn（n为free buffer的个数）
+  // 目的是为了让释放回去的地址集中在高地址空间便于减少内存碎片
+  vector<BufferHandle> GetBuffersToFree(int64_t num_buffers) {
+    vector<BufferHandle> buffers;
+    std::sort(free_list_.begin(), free_list_.end(), SortCompare);
+
+    for (int64_t i = 0; i < num_buffers; ++i) {
+      buffers.emplace_back(std::move(free_list_.back()));
+      free_list_.pop_back();
+    }
+    return buffers;
+  }
+
+
+----------------------------------------------
+# clean_pages的清理顺序
+以FIFO的方式剔除BufferPool::BufferAllocator某个core的FreeBufferArena的clean_pages中的page。
+注意这里是BufferAllocator，所以是整个系统层级的clean_pages的回收顺序。
+```cpp
+Class PerSizeLists {
+
+    /// Unpinned pages that have had their contents written to disk. These pages can be
+    /// evicted to reclaim a buffer for any client. Pages are evicted in FIFO order,
+    /// so that pages are evicted in approximately the same order that the clients wrote
+    /// them to disk. Protected by FreeBufferArena::lock_.
+    InternalList<Page> clean_pages;
+};
+
+一个有两个函数会evict clean pages：
+
+void BufferPool::FreeBufferArena::AddCleanPage(Page* page) {
+  bool eviction_needed = DecreaseBytesRemaining(
+        page->len, true, &parent_->clean_page_bytes_remaining_) == 0;
+  lock_guard<SpinLock> al(lock_);
+  PerSizeLists* lists = GetListsForSize(page->len);
+  DCHECK_EQ(lists->num_clean_pages.Load(), lists->clean_pages.size());
+  if (eviction_needed) {
+    if (lists->clean_pages.empty()) {
+      // No other pages to evict, must evict 'page' instead of adding it.
+      lists->AddFreeBuffer(move(page->buffer));
+    } else {
+      // Evict an older page (FIFO eviction) to make space for this one.
+      Page* page_to_evict = lists->clean_pages.Dequeue();
+      lists->clean_pages.Enqueue(page);
+      BufferHandle page_to_evict_buffer;
+      {
+        lock_guard<SpinLock> pl(page_to_evict->buffer_lock);
+        page_to_evict_buffer = move(page_to_evict->buffer);
+      }
+      lists->AddFreeBuffer(move(page_to_evict_buffer));
+    }
+  } else {
+    lists->clean_pages.Enqueue(page);
+    lists->num_clean_pages.Add(1);
+  }
+}
+
+
+pair<int64_t, int64_t> BufferPool::FreeBufferArena::FreeSystemMemory(
+    int64_t target_bytes_to_free, int64_t target_bytes_to_claim,
+    std::unique_lock<SpinLock>* arena_lock) { 
+  // Search from largest to smallest to avoid freeing many small buffers unless
+  // necessary.
+  for (int i = NumBufferSizes() - 1; i >= 0; --i) {
+    PerSizeLists* lists = &buffer_sizes_[i];
+    FreeList* free_buffers = &lists->free_buffers;
+    InternalList<Page>* clean_pages = &lists->clean_pages;
+
+    // Figure out how many of the buffers in the free list we should free.
+    DCHECK_GT(target_bytes_to_free, bytes_freed);
+    const int64_t buffer_len = 1L << (i + parent_->log_min_buffer_len_);
+    int64_t buffers_to_free = min(free_buffers->Size(),
+        BitUtil::Ceil(target_bytes_to_free - bytes_freed, buffer_len));
+    int64_t buffer_bytes_to_free = buffers_to_free * buffer_len;
+    // Evict clean pages by moving their buffers to the free page list before freeing
+    // them. This ensures that they are freed based on memory address in the expected
+    // order.
+    while (bytes_freed + buffer_bytes_to_free < target_bytes_to_free) {
+      Page* page = clean_pages->Dequeue();
+      BufferHandle page_buffer;
+      {
+        page_buffer = move(page->buffer);
+      }
+      free_buffers->AddFreeBuffer(move(page_buffer));
+    }
+  }
+
+  return make_pair(bytes_freed, bytes_claimed);
+}
+
+```
+---------------------------------------------
+# BufferPool::Client中dirty_unpinned_pages_写出顺序
+  以LIFO的方式异步写出
+```cpp
+class BufferPool::Client {
+    /// Dirty unpinned pages for this client for which writes are not in flight. Page
+  /// writes are started in LIFO order, because operators typically have sequential access
+  /// patterns where the most recently evicted page will be last to be read.
+  PageList dirty_unpinned_pages_;
+}
+```
