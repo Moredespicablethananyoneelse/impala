@@ -22243,7 +22243,7 @@ void RequestContext::OperDone(WriteRange* write_range, const Status& status) {
 我们举BufferPool::client读取数据的例子：
 
 
-
+```cpp
 Status BufferPool::Client::StartMoveEvictedToPinned(
     unique_lock<mutex>* client_lock, ClientHandle* client, Page* page) {
   DCHECK(!page->buffer.is_open());
@@ -22346,9 +22346,10 @@ Status RequestContext::StartScanRange(ScanRange* range, bool* needs_buffers) {
   DCHECK(Validate()) << endl << DebugString();
   return Status::OK();
 }
+```
 将ScanRange请求添加到RequestContext：：PerDiskState队列：
 
-
+```cpp
 void RequestContext::AddRangeToDisk(const unique_lock<mutex>& lock,
     RequestRange* range, ScheduleMode schedule_mode) {
   DCHECK(lock.mutex() == &lock_ && lock.owk());
@@ -22396,7 +22397,10 @@ void RequestContext::AddRangeToDisk(const unique_lock<mutex>& lock,
 
   ++disk_state->num_remaining_ranges();
 }
+```
+
 然后DiskIOMgr通过RequestRange* DiskQueue::GetNextRequestRange(RequestContext** request_context) {
+```cpp
   // This loops returns either with work to do or when the disk IoMgr shuts down.
   while (true) {
     *request_context = nullptr;
@@ -22426,7 +22430,11 @@ void RequestContext::AddRangeToDisk(const unique_lock<mutex>& lock,
   }
   DCHECK(shut_down_);
   return nullptr;
-} 和RequestRange* RequestContext::GetNextRequestRange(int disk_id)   PerDiskState* request_disk_state = &disk_states_[disk_id];
+}
+``` 
+和
+```cpp
+RequestRange* RequestContext::GetNextRequestRange(int disk_id)   PerDiskState* request_disk_state = &disk_states_[disk_id];
   // NOTE: no locks are held, so other threads could have modified the state of the reader
   // and disk state since this context was pulled off the queue. Only one disk thread can
   // be in this function for this reader, since the reader was removed from the queue and
@@ -22497,7 +22505,11 @@ void RequestContext::AddRangeToDisk(const unique_lock<mutex>& lock,
   request_disk_state->ScheduleContext(request_lock, this, disk_id);
   DCHECK(Validate()) << endl << DebugString();
   return range;
-}获取ScanRange，然åskQueue::DiskThreadLoop(DiskIoMgr* io_mgr) {
+}
+```
+获取ScanRange，然
+```cpp
+DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr) {
   // The thread waits until there is work or the queue is shut down. If there is work,
   // performs the read or write requested. Locks are not taken when reading from or
   // writing to disk.
@@ -22557,9 +22569,11 @@ void RequestContext::AddRangeToDisk(const unique_lock<mutex>& lock,
     }
   }
 }
+```
 
  调用 ReadOutcome outcome = scan_range->DoRead(this, disk_id_);
-代eadOutcome ScanRange::DoRead(DiskQueue* queue, int disk_id) {
+```cpp
+ReadOutcome ScanRange::DoRead(DiskQueue* queue, int disk_id) {
   bool use_local_buffer = false;
   bool use_mem_buffer = false;
   if (disk_file_ != nullptr && disk_file_->disk_type() != DiskFileType::LOCAL
@@ -22741,13 +22755,17 @@ ReadOutcome ScanRange::DoReadInternal(DiskQueue* queue, int disk_id, bool use_lo
   // because the client may notice eos, then reuse the scan range.
   return eosr ? ReadOutcome::SUCCESS_EOSR : ReadOutcome::SUCCESS_NO_EOSR;
 }
+```
 
 调用  file_reader->ReadFromPos(queue, offs+ bytes_read_, buffer_desc->buffer_,
                 min(bytes_to_read() - bytes_read_, buffer_desc->buffer_len_),
                 &buffer_desc->len_, &eof);这个同步读取接口。
 当DiskIOMgr调用完读取完file_reader->ReadFromPos(queue, offset_ + bytes_read_, buffer_desc->buffer_,
                 min(bytes_to_read() - bytes_read_, buffer_desc->buffer_len_),
-                &buffer_desc->len_, &eof);获取数据后，会通过EnqueueReadyBuffer(move(buffer_desc)将数据放入ScanRange的read_buffe
+                &buffer_desc->len_, &eof);
+                
+    获取数据后，会通过EnqueueReadyBuffer(move(buffer_desc)将数据放入ScanRange的read_buffer
+```cpp
 Status BufferPool::Client::FinishMoveEvictedToPinned(Page* page) {
   SCOPED_TIMER(counters().read_wait_time);
   lock_guard<SpinLock> pl(page->buffer_lock);
@@ -22827,6 +22845,7 @@ exit:
   handle->read_range_ = nullptr;
   return status;
 }
+```
 进而通过Status status = handle->read_range_->GetNext(&io_mgr_buffer);等待ScanRange的ready_buffers不空和DiskIOMgr的ScanRange::DoRead同步。
 
 
@@ -22842,7 +22861,7 @@ DiskIOMgr的IOçnge的同步接口DoWrite后，会继续调用WriteRange属性�
 那么用户线程如何使用WriteRange提供的功能呢？比如用户线程指定的callback回调函数能用来干什么呢，
 我们看下BufferPool::Client::WriteDirtyPagesAsync的Write的例子：
 
-
+```cpp
 void BufferPool::Client::WriteDirtyPagesAsync(int64_t min_bytes_to_write) {
   DCHECK_GE(min_bytes_to_write, 0) << DebugStringLocked();
   DCHECK_LE(min_bytes_to_write, dirty_unpinned_pages_.bytes()) << DebugStri();
@@ -22893,8 +22912,9 @@ void BufferPool::Client::WriteDirtyPagesAsync(int64_t min_bytes_to_write) {
     bytes_written += page->len;
   }
 }
+```
 这个函数调用了
-
+```cpp
 Status TmpFileGroup::Write(MemRange buffer, WriteDoneCallback cb,
     unique_ptr<TmpWriteHandle>* handle, const BufferPoolClientCounters* counters) {
   DCHECK_GE(buffer.len(), 0);
@@ -22909,8 +22929,9 @@ Status TmpFileGroup::Write(MemRange buffer, WriteDoneCallback cb,
   *handle = move(tmp_handle);
   return Status::OK();
 }
+```
 也就是说：这个函数会将写请求委托给TmpWriteHandle，而TmpWriteHandle会将请求封装成WriteRange，然后提交给DiskIOMgr，代码如下：
-
+```cpp
 Status TmpWriteHandle::Write(RequestContext* io_ctx, MemRange buffer,
     WriteRange::WriteDoneCallback callback, const BufferPoolClientCounters* counters(!write_in_flight_);
   MemRange buffer_to_write = buffer;
@@ -22971,8 +22992,10 @@ Status TmpWriteHandle::Write(RequestContext* io_ctx, MemRange buffer,
   parent_->bytes_written_counter_->Add(buffer_to_write.len());
   return Status::OK();
 }
+```
 进而通过  status = parent_->tmp_file_mgr()->Asyncge(write_range_.get(), tmp_file);
 调用
+```cpp
 Status TmpFileMgr::AsyncWriteRange(WriteRange* write_range, TmpFile* tmp_file) {
   if (write_range->disk_file()->disk_type() == io::DiskFileType::LOCAL) {
     DCHECK(write_range != nullptr);
@@ -22986,7 +23009,9 @@ Status TmpFileMgr::AsyncWriteRange(WriteRange* write_range, TmpFile* tmp_file) {
   DCHECK(tmp_file != nullptr);
   return tmp_dirs_remote_ctrl_.tmp_file_pool_->EnqueueWriteRange(write_range, tmp_file);
 }
+```
 进而调用
+```cpp
 Status RequestContext::AddWriteRange(WriteRange* write_range) {
   unique_lock<mutex> lock(lock_);
   if (state_ == RequestContext::Cancelled) return CONTEXT_CANCELLED;
@@ -22994,8 +23019,10 @@ Status RequestContext::AddWriteRange(WriteRange* write_range) {
   AddRangeToDisk(lock, writ ScheduleMode::IMMEDIATELY);
   return Status::OK();
 }
+```
 将WriteRange放入PerDiskState的队列。后续的从PerDiskState取出WriteRange的步骤和ScanRange在DiskIOMgr的IO线程的调度方式类似。
 不同的是在
+```cpp
 void DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr) {
   // 其他代码省略
       switch (range->request_type()) {
@@ -23013,9 +23040,11 @@ void DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr) {
       }
   // 其他代码省略
 }
+```
 的实现中worker_context->OperDone(write_range, status);会调用用户线程创建WriteRange时指定的回调函数。
 而worker_context->ReadDone(disk_id_, outcome, scan_range);则的统计信息。
 代码如下：
+```cpp
 void RequestContext::OperDone(RequestRange* range, const Status& status) {
   DCHECK(range != nullptr);
 
@@ -23041,8 +23070,9 @@ void RequestContext::OperDone(RequestRange* range, const Status& status) {
     --state.num_remaining_ranges();
   }
 }
-        
+```        
 WriteRange的回调函数(static_cast<RemoteOperRange*>(range))->callback()(status);，最终会调用函数如下：
+```cpp
 void BufferPool::Client::WriteCompleteCallback(Page* page, const Status& write_status) {
 #ifndef NDEBUG
   if (debug_write_delay_ms_ > 0) SleepForMs(debug_write_delay_ms_);
@@ -23065,8 +23095,9 @@ void BufferPool::Client::WriteCompleteCallback(Page* page, const Status& write_s
     write_complete_cv_.NotifyAll();
   }
 }
-
+```
 而 BufferPool::Client利用了WriteRange的回调函数，实现Page和Client的同步等待，代码如下：
+```cpp
 void BufferPool::Client::WaitForWrite(unique_lock<mutex>* client_lock, Page* page) {
   DCheckHoldsLock(*client_lock);
   while (in_flight_write_pages_.Contains(page)) {
@@ -23081,13 +23112,15 @@ void BufferPool::Client::WaitForAllWrites() {
     write_complete_cv_.Wait(cl);
   }
 }
-
+```
 总结如下：ScanRange直接提供了GetNext()的同步接口，同步机制使用的是ScanRange的ScanBufferMgr的ready_buffers和unused_iomgr_buffers两个队列。
 TmpFileGroup提供了异步读取接口Status TmpFileGroup::ReadAsync(TmpWriteHandle* handle, MemRange buffer) ；skIOMgr IO线程调度ScanRange读取数据。
 而Status TmpFileGroup::WaitForAsyncRead(
     TmpWriteHandle* handle, MemRange buffer, const BufferPoolClientCounters* counters)可以直接利用ScanRange::GetNext();
     与接口 TmpFileGroup::ReadAsync(TmpWriteHandle* handle, MemRange buffer)进行同步。因此DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr)在处理ScanRange的请求时，不需要调用回调函数（事实上，用户也没指定回调函数）
     代码如下：  
+  
+  ```cpp
     case RequestType::READ: {
         ScanRange* scan_range = static_cast<ScanRange*>(range);
         ReadOutcome outcome = scan_range->DoRead(this, disk_id_);
@@ -23097,11 +23130,13 @@ TmpFileGroup提供了异步读取接口Status TmpFileGroup::ReadAsync(TmpWriteHa
         worker_context->ReadDone(disk_id_, outcome, scan_range);
         break;
       }
+   ```
 
 
 与之相对：由于WriteRange没有提供类似于StNext的同步接口。只提供了回调函数机制。
 DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr)在处理WriteRange后，调用了WriteRange的回调函数。
 代码如下；
+```cpp
    case RequestType::WRITE: {
         WriteRange* write_range = static_cast<WriteRange*>(range);
         Status status = write_range->DoWrite();
@@ -23111,22 +23146,32 @@ DiskQueue::DiskThreadLoop(DiskIoMgr* io_mgr)在处理WriteRange后，调用了Wr
         worker_context->OperDone(write_range, status);
         break;
       }
+  ```
 
 继而
+```cpp
 Status TmpWriteHandle::Write(RequestContext* io_ctx, MemRange buffer,
     WriteRange::WriteDoneCallback callback, const BufferPoolClientCounters* counters) ；
+```
 继而
+```cpp
 Status TmpFileGroup::Write(MemRange buffer, WriteDoneCallback cb,
     uniquriteHandle>* handle, const BufferPoolClientCounters* counters) ；
-
+```
 都是需要指定回调函数。
-void BufferPool::Client::WriteDirtyPagesAsync(int64_t min_bytes_to_write)；不需要指定回调函数，是因为这个函数内部创建了回调函数，代码如下：
+```cpp
+void BufferPool::Client::WriteDirtyPagesAsync(int64_t min_bytes_to_write)；
+```
+不需要指定回调函数，是因为这个函数内部创建了回调函数，代码如下：
+```cpp
      Status status = file_group_->Write(page->buffer.mem_range(),
           [this, page](
               const Status& write_status) { WriteCompleteCallback(page, write_status); },
           &page->write_handle, &counters_);
+```
 为了同步 fferPool::Client::WriteDirtyPagesAsync的写入操作。
 BufferPool::Client利用了底层WriteRange，TmpWriteHanle,TmpFileGroup提供的回调函数机制。在回调函数中使用了条件变量和锁,实现用户线程和负责调度WriteRange的DiskIOMgr IO线程的同步，代码如下：
+```cpp
 
 void BufferPool::Client::WriteCompleteCallback(Page* page, const Status& write_status) {
 #ifndef NDEBUG
@@ -23163,7 +23208,7 @@ void BufferPool::Client::WaitForAllWrites() {
     write_complete_cv_.Wait(cl);
   }
 }
-
+```
 这样说来，file_reader(比如本地/远程hdfsfilereader)是同步的。经过DiskIOMgr线程调度ScanRange->
 
 IO线程---------------------------------                   同步机制                                         用户线程
@@ -23177,6 +23222,7 @@ void RequestContext::ReadDone(int disk_id, ReadOutcome outcome, ScanRange* range
 但是无论哪种异步方式，是通过ScanRange的ScanBufferManager的ready_b和unused_iomgr_bufffers同步，还是通过为构造WriteRange时指定的回调函数提供互斥量和条件变量。
 最终用户提交ScanRange或者WriteRange后，都需要提供一种方式用户等待（也许不用等）后台线程的完成。
 比如BufferPool::Client的读取功能提供：
+```cpp
 Status BufferPool::Client::StartMoveEvictedToPinned(
     unique_lock<mutex>* client_lock, ClientHandle* client, Page* page)启动读取过程 ，还需要提供Status BufferPool::Client::FinishMoveEvictedToPd(Page* page)。
 比如BufferPool::Client的写入功能提供：
@@ -23194,16 +23240,19 @@ void BufferPool::Client::WaitForAllWrites() {
   while (in_flight_write_pages_.size() > 0) {
     write_complete_cv_.Wait(cl);
   }
-}等待写入完成
+}
+```
+等待写入完成
 
 即使是协程也一样。需要调度程序时不时（比如轮询，比如通过io_uring接口）的检查某个协程提交的请求是否完成，如果完成就恢复指定协程。
 
 此外，TmpFileGroup还提供了同步接口Read，如下：
+```cpp
 Status TmpFileGroup::Read(TmpWriteHandle* handle, MemRange buffer) {
   RETURN_IF_ERROR(ReadAsync(handle, buffer));
   return WaitForAsyncRead(ndle, buffer);
 }
-
+```
 *****************************************************************************************************
 您通过完整的代码链路梳理，精准揭示了`ScanRange`与`WriteRange`在同步机制、交互模式上的核心差异——本质是**“用户线程与IO线程的同步责任归属”不同**：`ScanRange`将同步逻辑封装在自身接口中，用户线程直接依赖其阻塞接口等待结果；`WriteRange`则将同步责任交给用户，通过回调函数+用户自定义变量实现同步。以下结合您提供的代码细节，系统总结两者的设计差异、底层逻辑及适用场景：
 
