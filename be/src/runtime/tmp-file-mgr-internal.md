@@ -1,3 +1,595 @@
+```cpp
+/// TmpFile 是临时目录中物理文件的句柄。可以使用 AllocateSpace() 分配文件空间，并使用 Remove() 删除文件。由 TmpFileMgr 内部使用。
+///
+/// 物理文件在文件系统中的创建被推迟，直到由 DiskIoMgr 写入该文件为止。
+///
+/// TmpFile 的方法不是线程安全的。
+class TmpFile {
+ public:
+  TmpFile(TmpFileGroup* file_group, TmpFileMgr::DeviceId device_id,
+          const std::string& path, bool expected_local = true);
+  virtual ~TmpFile() {}
+
+  /// 如果临时目录中有空闲容量，则为该文件中的新数据块分配 'num_bytes' 字节。
+  /// 如果容量不足，则返回 false。否则，更新状态并返回 true。
+  /// 此函数实际上不执行任何文件操作。
+  /// 成功时，将 'offset' 设置为分配范围内第一个字节的文件偏移量。
+  virtual bool AllocateSpace(int64_t num_bytes, int64_t* offset) = 0;
+
+  /// 当遇到该文件的 IO 错误时调用。记录错误并将文件列入黑名单。
+  /// 如果文件刚刚被列入黑名单，则返回 true。
+  bool Blacklist(const ErrorMsg& msg);
+
+  /// 删除物理文件，包括磁盘上的缓冲区（如果已创建）。
+  /// 调用 Remove() 后，不得再读取或写入该文件。
+  virtual Status Remove() = 0;
+
+  /// 获取用于 IO 管理器队列的磁盘 ID。
+  int AssignDiskQueue(bool is_local_buffer = false) const;
+
+  /// 尝试在文件中的 'offset' 处打孔，大小为 'len'。
+  Status PunchHole(int64_t offset, int64_t len);
+
+  /// 返回用于写入的确切文件句柄。对于远程溢出，默认返回本地缓冲区文件而不是远程文件。
+  virtual io::DiskFile* GetWriteFile() = 0;
+
+  /// 返回 TmpFile 的路径。
+  /// 如果是远程临时文件，则路径应为远程暂存空间路径。
+  /// 类似地，如果是本地文件，则路径应为本地路径。
+  const std::string& path() const { return path_; }
+
+  /// 调用者必须持有 TmpFileMgr::FileGroup::lock_。
+  bool is_blacklisted() const { return blacklisted_; }
+
+  /// 返回文件的当前长度。
+  int64_t len() const { return allocation_offset_; }
+
+  /// 返回临时文件的磁盘 ID。
+  virtual int disk_id(bool is_file_op = false) const {
+    // 文件操作的磁盘 ID 仅在 TmpFileRemote 中支持。
+    DCHECK(!is_file_op);
+    return disk_id_;
+  }
+
+  /// 返回临时文件是否在本地文件系统中。
+  bool is_local() { return expected_local_; }
+
+  /// 返回 TmpFile 的本地缓冲区路径。
+  const string& LocalBuffPath() { return local_buffer_path_; }
+
+  std::string DebugString();
+
+  /// 帮助获取与该文件关联的 TmpDir。
+  TmpDir* GetDir();
+
+  /// 帮助获取与该文件关联的 TmpFileGroup。
+  TmpFileGroup* FileGroup() const { return file_group_; }
+
+  /// 返回磁盘文件的指针。
+  io::DiskFile* DiskFile() { return disk_file_.get(); }
+
+  /// 返回文件所在磁盘类型。
+  io::DiskFileType disk_type() { return disk_type_; }
+
+ private:
+  friend class TmpFileMgrTest;
+  friend class TmpFileLocal;
+  friend class TmpFileRemote;
+  friend class TmpFileDummy;
+  friend class TmpWriteHandle;
+
+  /// Impala 在每个配置的暂存目录中创建的子目录名称。
+  const static std::string TMP_SUB_DIR_NAME;
+
+  /// 暂存目录中理想情况下必须可用于写入的空间（以 MB 为单位）。
+  /// 如果可用空间少于此阈值，则发出警告。
+  const static uint64_t AVAILABLE_SPACE_THRESHOLD_MB;
+
+  /// 所属的 TmpFileGroup。不能为空。
+  TmpFileGroup* const file_group_;
+
+  /// 文件系统中的物理文件路径。
+  const std::string path_;
+
+  /// 该文件存储的临时设备。
+  const TmpFileMgr::DeviceId device_id_;
+
+  /// 物理文件所在的磁盘 ID。
+  int disk_id_;
+
+  // 如果文件预期在本地文件系统中。
+  bool expected_local_;
+
+  /// 通过 AllocateSpace() 分配的文件总字节数。请注意，
+  /// 这些字节可能并未实际使用文件系统上的空间，要么是因为数据尚未写入，要么是因为已打孔。
+  /// 由 AllocateSpace() 修改。
+  /*
+    记录文件的逻辑大小，而不是物理大小。
+    因为punch hole并不修改文件的逻辑大小。
+    allocattion_offset_ - bytes_reclaimed才是真正的文件占用的磁盘的大小
+  */
+  int64_t allocation_offset_ = 0;
+
+  /// 通过打孔回收的字节。
+  AtomicInt64 bytes_reclaimed_{0};
+
+  /// 设置为 true 以指示不应在此文件中分配更多空间。
+  /// 由 TmpFileMgr::FileGroup::lock_ 保护。
+  bool blacklisted_;
+
+  /// 指定文件所在磁盘的类型。
+  io::DiskFileType disk_type_;
+
+  /// TmpFile 的本地缓冲区文件路径。
+  string local_buffer_path_;
+
+  /// 临时文件的磁盘文件，是用于管理状态和操作物理文件的句柄。
+  std::unique_ptr<io::DiskFile> disk_file_;
+};
+
+/// TmpFileLocal 是 TmpFile 的派生类，用于提供处理本地文件系统临时目录中物理文件的方法。
+class TmpFileLocal : public TmpFile {
+ public:
+  TmpFileLocal(TmpFileGroup* file_group, TmpFileMgr::DeviceId device_id,
+               const std::string& path, bool expected_local = true);
+
+  bool AllocateSpace(int64_t num_bytes, int64_t* offset) override;
+
+  io::DiskFile* GetWriteFile() override;
+
+  Status Remove() override;
+};
+
+/// TmpFileRemote 是 TmpFile 的派生类，用于提供处理远程文件系统临时目录中物理文件的方法。
+///
+/// 锁定：
+/// 对于远程临时文件，应用锁定机制以保证对文件的写入、读取或上传的安全。
+/// 远程临时文件可以有两个 DiskFile：本地缓冲区和远程文件。
+/// 每个 DiskFile 拥有两种类型的锁：文件锁和状态锁。
+/// DiskFile::physical_file_lock_ -- 文件锁
+/// DiskFile::status_lock_ -- 状态锁
+/// 对于文件删除操作，需要唯一的文件锁。对于文件上的其他操作（如读取或写入），需要共享文件锁以保护文件免于删除。
+/// 对于状态转换，线程需要持有状态锁，详细信息可在 TmpFileRemote 的头部找到。
+/// 如果操作需要来自两个 DiskFile 的锁，例如上传操作，则获取锁的顺序必须从本地文件到远程文件，以避免死锁，并且文件锁需要在状态锁之前获取。
+///
+/// 默认情况下，有两个 DiskFile：本地缓冲区和远程文件，用于管理临时文件的状态。对于每个 DiskFile，有三种状态：InWriting/Persisted/Deleted，详细信息可在 DiskFile 的头部找到。
+/// 假设：
+/// 本地缓冲区：InWriting A, Persisted B, Deleted C
+/// 远程文件：InWriting D, Persisted E, Deleted F
+/// 远程临时文件的正常状态转换过程应为：
+/// AD ---> BD 本地缓冲区文件关闭
+/// BD ---> BE 上传完成
+/// BE ---> CE 本地缓冲区被驱逐
+/// 任何状态 ---> CF 临时文件销毁
+/// 大多数状态转换在 DiskIoMgr 中完成，当 IO 操作完成时。
+/// 对于读取或更改状态，应获取特定 DiskFile 的状态锁。
+class TmpFileRemote : public TmpFile {
+ public:
+  TmpFileRemote(TmpFileGroup* file_group, TmpFileMgr::DeviceId device_id,
+                const std::string& path, const std::string& local_buffer_path,
+                bool expected_local = false, const char* url = nullptr);
+  ~TmpFileRemote();
+
+  bool AllocateSpace(int64_t num_bytes, int64_t* offset) override;
+
+  io::DiskFile* GetWriteFile() override;
+
+  TmpDir* GetLocalBufferDir() const;
+
+  Status Remove() override;
+
+  /// 返回用于读取的缓冲区文件句柄。
+  /// 如果本地文件未被驱逐，则立即返回。
+  /// 如果本地文件被驱逐且启用批量读取，则可能异步发送请求从远程获取块到内存。
+  io::DiskFile* GetReadBufferFile(int64_t offset);
+
+  /// 向磁盘队列发送请求，从远程文件系统异步获取块。
+  /// 如果内容在缓冲区块中，则将 "fetched" 设置为 true。否则，
+  /// 调用者应从远程文件系统获取页面。
+  void AsyncFetchReadBufferBlock(io::DiskFile* read_buffer_file,
+                                 io::MemBlock* read_buffer_block, int buffer_idx,
+                                 bool* fetched);
+
+  /// 从文件偏移量获取读取缓冲区块索引。
+  int GetReadBufferIndex(int64_t offset);
+
+  /// 增加已从缓冲区块读取的页面计数器。
+  /// 如果块的所有页面都已被读取，则返回 true。
+  bool IncrementReadPageCount(int buffer_idx);
+
+  /// 尝试删除缓冲区块并释放预留。
+  template <typename T>
+  void TryDeleteReadBuffer(const T& lock, int buffer_idx);
+
+  /// 使用独占锁尝试删除缓冲区块并释放预留。
+  void TryDeleteReadBufferExcl(int buffer_idx) {
+    std::unique_lock<boost::shared_mutex> lock(*(disk_buffer_file_->GetFileLock()));
+    TryDeleteReadBuffer(lock, buffer_idx);
+  }
+
+  /// 使用共享锁尝试删除缓冲区块并释放预留。
+  /// 除非确定在删除期间无人访问特定读取缓冲区块且场景需要高性能，否则使用独占锁。
+  void TryDeleteMemReadBufferShared(int buffer_idx) {
+    boost::shared_lock<boost::shared_mutex> lock(*(disk_buffer_file_->GetFileLock()));
+    TryDeleteReadBuffer(lock, buffer_idx);
+  }
+
+  /// 返回文件大小。
+  int64_t file_size() const { return file_size_; }
+
+  /// 返回磁盘缓冲区文件指针。
+  io::DiskFile* DiskBufferFile() { return disk_buffer_file_.get(); }
+
+  /// 将 at_capacity_ 指示器设置为 true。
+  void SetAtCapacity() {
+    DCHECK(!at_capacity_);
+    at_capacity_ = true;
+  }
+
+  /// 设置文件是否已入队。
+  /// 该函数是线程安全的。
+  void SetEnqueued(bool is_enqueued) {
+    std::lock_guard<SpinLock> l(lock_);
+    DCHECK(is_enqueued != enqueued_);
+    enqueued_ = is_enqueued;
+  }
+
+  /// 设置文件的缓冲区已返回到池中。
+  /// 该函数是线程安全的。
+  void SetBufferReturned() {
+    std::lock_guard<SpinLock> l(lock_);
+    DCHECK(!buffer_returned_);
+    buffer_returned_ = true;
+  }
+
+  /// 返回文件是否已入队到临时文件可用池中。
+  /// 该函数是线程安全的。
+  bool is_enqueued() {
+    std::lock_guard<SpinLock> l(lock_);
+    return enqueued_;
+  }
+
+  /// 返回缓冲区是否已返回到临时文件可用池中。
+  /// 该函数是线程安全的。
+  bool is_buffer_returned() {
+    std::lock_guard<SpinLock> l(lock_);
+    return buffer_returned_;
+  }
+
+  /// 设置标志以指示文件即将被删除。
+  void SetToDeleteFlag(bool to_delete = true) {
+    disk_buffer_file_->SetToDeleteFlag(to_delete);
+    disk_file_->SetToDeleteFlag(to_delete);
+  }
+
+  /// 返回临时文件的磁盘 ID。
+  /// 如果 is_file_op 为 true，则返回专门用于文件操作的磁盘 ID。
+  int disk_id(bool is_file_op = false) const override {
+    if (!is_file_op) return disk_id_;
+    return disk_id_file_op_;
+  }
+
+ private:
+  friend class TmpWriteHandle;
+  friend class TmpFileMgr;
+  friend class TmpFileGroup;
+  friend class TmpFileBufferPool;
+  friend class TmpFileMgrTest;
+
+  /// 临时文件的默认文件大小，但如果写入文件的最后一个页面的尺寸超过剩余空间，则实际文件大小可能略大。
+  int64_t file_size_ = 0;
+
+  /// 远程文件读取缓冲区块的默认大小。
+  /*
+     如果文件小于16M，就取值文件大小。否则最大16M，
+  */
+  int64_t read_buffer_block_size_ = 0;
+
+  /// 用于文件操作的磁盘 ID。
+  int disk_id_file_op_ = 0;
+
+  /// HDFS 文件的 mtime 的伪值。
+  const int64_t mtime_{100000};
+
+  // 磁盘缓冲区文件的指针，即远程磁盘文件的本地缓冲区。该缓冲区用于写入。
+  std::unique_ptr<io::DiskFile> disk_buffer_file_;
+
+  /// 用于连接到远程暂存路径的 HDFS 连接。
+  hdfsFS hdfs_conn_;
+
+  /// 如果分配的空间等于或刚好超过默认文件大小时，无法再分配空间，则 at_capacity_ 设置为 true。
+  bool at_capacity_ = false;
+
+  /// 用于文件上传的范围。
+  std::unique_ptr<io::RemoteOperRange> upload_range_;
+
+  /// 用于从远程文件系统执行获取操作的范围。
+  std::vector<std::unique_ptr<io::RemoteOperRange>> fetch_ranges_;
+
+  /// 保护以下成员。
+  SpinLock lock_;
+
+  /// 指示文件是否已入队到池中。用于调试。
+  bool enqueued_ = false;
+
+  /// 如果文件的缓冲区已返回到池中，则为 true。我们假设缓冲区仅返回一次，并且仅在预留缓冲区空间时需要返回。
+  bool buffer_returned_ = false;
+
+  // 每个读取缓冲区的已读取页面数。
+  std::unique_ptr<int64_t[]> disk_read_page_cnts_;
+
+  // 返回读取缓冲区块的起始偏移量。
+  int64_t GetReadBuffStartOffset(int buffer_idx) {
+    DCHECK(disk_buffer_file_ != nullptr);
+    return disk_buffer_file_->GetReadBuffStartOffset(buffer_idx);
+  }
+
+  // 返回读取缓冲区块的页面数。
+  int64_t GetReadBuffPageCount(int buffer_idx) {
+    DCHECK(disk_buffer_file_ != nullptr);
+    return disk_buffer_file_->GetReadBuffPageCount(buffer_idx);
+  }
+
+  /// 缓冲区索引的内部 DCHECK。
+  void DCheckReadBufferIdx(int buffer_idx) {
+    DCHECK_LT(buffer_idx, file_group_->tmp_file_mgr()->GetNumReadBuffersPerFile());
+    DCHECK_GE(buffer_idx, 0);
+  }
+};
+
+/// TmpFileDummy 是 TmpFile 的派生类，用于虚拟分配，仅在 TmpFileBufferPool 中使用。
+class TmpFileDummy : public TmpFile {
+ public:
+  TmpFileDummy() : TmpFile(nullptr, -1, "") { disk_type_ = io::DiskFileType::DUMMY; }
+
+  bool AllocateSpace(int64_t num_bytes, int64_t* offset) override { return true; }
+
+  io::DiskFile* GetWriteFile() override { return nullptr; }
+
+  Status Remove() override { return Status::OK(); }
+};
+
+/// 配置的临时目录，TmpFileMgr 在其中分配文件。
+class TmpDir {
+ public:
+  TmpDir(const std::string& raw_path) : raw_path_(raw_path) {}
+
+  virtual ~TmpDir() {}
+
+  /// 解析原始路径并识别暂存目录选项。
+  Status Parse();
+
+  /// 验证暂存路径并创建目录。
+  virtual Status VerifyAndCreate(MetricGroup* metrics, vector<bool>* is_tmp_dir_on_disk,
+                                 bool need_local_buffer_dir,
+                                 TmpFileMgr* tmp_mgr) = 0;
+
+  /// 获取目录路径的连接。仅用于远程目录。
+  virtual Status GetConnection(TmpFileMgr* tmp_mgr, hdfsFS* conn) = 0;
+
+  int64_t bytes_limit() { return bytes_limit_; }
+
+  int priority() { return priority_; }
+
+  const string& path() { return path_; }
+
+  IntGauge* bytes_used_metric() const { return bytes_used_metric_; }
+
+  virtual bool is_local() { return false; }
+
+ private:
+  friend class TmpFileMgr;
+  friend class TmpDirHdfs;
+  friend class TmpDirS3;
+  friend class TmpDirLocal;
+
+  /// 临时目录的原始路径。
+  const std::string raw_path_;
+
+  /// 临时目录的解析后的原始路径，例如，已修剪。
+  std::string parsed_raw_path_;
+
+  /// 临时目录的完整路径。
+  std::string path_;
+
+  /// 应写入该路径的字节限制。如果没有限制，则设置为 int64_t 的最大值。
+  /*
+    TmpDirLocal和TmpDirS3和TmpDirHdfs都有各自的限制。
+  */
+  int64_t bytes_limit_ = numeric_limits<int64_t>::max();
+
+  /// 暂存目录优先级。
+  int priority_ = numeric_limits<int>::max();
+
+  /// 该临时目录当前使用的暂存字节。
+  /*
+    记录的是该Dir对象下的文件占用的物理磁盘大小。
+    punch hole时会减少该值。
+  */
+  IntGauge* bytes_used_metric_;
+
+  /// Parse() 的辅助函数，用于解析原始路径并生成暂存目录的完整路径。
+  /// "Tokens" 将包含从原始路径解析的 {path, [bytes_limit, [priority]]} 令牌。
+  virtual Status ParsePathTokens(std::vector<string>& tokens) = 0;
+
+  /// Parse() 的辅助函数，用于解析暂存目录的字节限制。
+  Status ParseByteLimit(const string& byte_limit);
+
+  /// Parse() 的辅助函数，用于解析暂存目录的优先级。
+  Status ParsePriority(const string& priority);
+};
+
+class TmpDirLocal : public TmpDir {
+ public:
+  TmpDirLocal(const std::string& path) : TmpDir(path) {}
+
+  Status VerifyAndCreate(MetricGroup* metrics, vector<bool>* is_tmp_dir_on_disk,
+                         bool need_local_buffer_dir, TmpFileMgr* tmp_mgr) override;
+
+  Status GetConnection(TmpFileMgr* tmp_mgr, hdfsFS* conn) override {
+    DCHECK(false) << "GetConnection() is not supported for a local temporary dir";
+    return Status("GetConnection() is not supported for a local temporary dir");
+  }
+
+  bool is_local() override { return true; }
+
+ private:
+  /// VerifyAndCreate() 的辅助函数，用于创建本地暂存目录。
+  Status CreateLocalDirectory(MetricGroup* metrics, vector<bool>* is_tmp_dir_on_disk,
+                              bool need_local_buffer_dir, int disk_id,
+                              TmpFileMgr* tmp_mgr);
+
+  /// CreateLocalDirectory() 的辅助函数，用于记录配置的本地暂存目录。
+  void LogScratchLocalDirectoryInfo(bool is_local_buffer_dir, int disk_id);
+
+  Status ParsePathTokens(std::vector<string>& tokens) override;
+};
+/*
+   1:remote dir:
+      remote-dirbase/hostname/backend-id/query-id/unique_id (参见ConstructRemoteDirPath)
+   2:new_file_path(即remote file)
+      remote-dirbase/hostname/backend-id/query-id/unique_id/impala-scratc-unique-name-xxx
+  3：local_buffer_dir:
+     dir1/
+  4：new_file_path_local:
+     dir1/impala-scratc-unique-name-xxx
+     
+*/
+class TmpDirS3 : public TmpDir {
+ public:
+  TmpDirS3(const std::string& path) : TmpDir(path) {}
+
+  Status VerifyAndCreate(MetricGroup* metrics, vector<bool>* is_tmp_dir_on_disk,
+                         bool need_local_buffer_dir, TmpFileMgr* tmp_mgr) override;
+
+  Status GetConnection(TmpFileMgr* tmp_mgr, hdfsFS* conn) override;
+
+ private:
+  Status ParsePathTokens(std::vector<string>& tokens) override;
+};
+
+class TmpDirHdfs : public TmpDir {
+ public:
+  TmpDirHdfs(const std::string& path) : TmpDir(path) {}
+
+  Status VerifyAndCreate(MetricGroup* metrics, vector<bool>* is_tmp_dir_on_disk,
+                         bool need_local_buffer_dir, TmpFileMgr* tmp_mgr) override;
+
+  Status GetConnection(TmpFileMgr* tmp_mgr, hdfsFS* conn) override;
+
+ private:
+  Status ParsePathTokens(std::vector<string>& tokens) override;
+};
+
+/// 临时文件缓冲池允许临时文件将其缓冲区返回到池中，并可以被驱逐以为其他文件腾出空间。
+/// 该池还为写入范围提供异步方式，在发送到磁盘队列进行写入之前等待可用空间预留。
+class TmpFileBufferPool {
+ public:
+  TmpFileBufferPool(TmpFileMgr* tmp_file_mgr);
+  ~TmpFileBufferPool();
+
+  // 循环为放入队列 write_ranges_ 的范围预留空间，
+  // 空间通过调用 DequeueTmpFilesPool() 从 tmp_files_avail_pool_ 获取。
+  // 一旦预留了空间，属于同一文件的写入范围将被发送到磁盘队列进行写入。
+  // 如果在发送到磁盘队列期间发生错误，则将使用状态调用写入范围的回调函数。
+  void TmpFileSpaceReserveThreadLoop();
+
+  /// 将写入范围入队等待缓冲区空间预留。同一文件的所有范围将被放入 write_ranges_to_add_ 映射中，
+  /// 等待预留完成，然后发送到磁盘队列。特别是，文件的第一写入范围（偏移量为 0）用于执行预留。
+  Status EnqueueWriteRange(io::WriteRange* range, TmpFile* file);
+
+  /// 当 "io_ctx" 所属的 TmpFileGroup 关闭时，调用该函数移除属于 "io_ctx" 的所有入队写入范围。
+  void RemoveWriteRanges(io::RequestContext* io_ctx);
+
+  // 将其缓冲区文件可用被驱逐的临时文件入队。
+  void EnqueueTmpFilesPool(std::shared_ptr<TmpFile>& tmp_file, bool front);
+
+  // 从可用池中出队一个临时文件，其缓冲区应可用被驱逐，为其他文件的缓冲区腾出空间。
+  Status DequeueTmpFilesPool(std::shared_ptr<TmpFile>* tmp_file, bool quick_return);
+
+  // 在销毁前关闭池。
+  void ShutDown();
+
+ private:
+  friend class TmpFileMgr;
+  friend class TmpFileMgrTest;
+
+  /// TmpFileBufferPool 所属的 TmpFileMgr。
+  TmpFileMgr* tmp_file_mgr_ = nullptr;
+
+  /// 存储远程临时文件指针的池，其缓冲区可用被驱逐。
+  /// 文件在以下情况下入队：
+  /// 1. 文件已上传到远程目录。
+  /// 2. 文件在不卸载的情况下被删除。
+  /// 文件通过调用 EnqueueTmpFilesPool() 入队，并通过 DequeueTmpFilesPool() 出队。
+  std::list<std::shared_ptr<TmpFile>> tmp_files_avail_pool_;
+
+  /// 临时文件可用池的条件变量，用于等待可用临时文件被驱逐。
+  /// DequeueTmpFilesPool() 中的 Wait() 和 EnqueueTmpFilesPool() 中的 NotifyOne()。
+  ConditionVariable tmp_files_available_cv_;
+
+  /// 保护临时文件可用池成员。
+  std::mutex tmp_files_avail_pool_lock_;
+
+  /// 保护以下成员的锁。
+  std::mutex lock_;
+
+  /// 条件变量，用于向空间预留线程发出信号，指示有工作要做或线程应关闭。
+  /// 当写入范围添加到队列 write_ranges_ 时，将唤醒空间预留线程。
+  ConditionVariable work_available_;
+
+  /// 等待缓冲区空间预留的写入范围。
+  /// 键是范围写入的 DiskFile 指针。
+  std::unordered_map<io::DiskFile*, std::vector<io::WriteRange*>> write_ranges_to_add_;
+
+  /// 记录 io_ctx 和磁盘文件的关系，在添加等待预留的写入范围时插入数据，
+  /// 在 TmpFileGroup 关闭时请求上下文析构时移除。
+  std::unordered_map<io::RequestContext*, std::unordered_set<io::DiskFile*>>
+      io_ctx_to_file_set_map_;
+
+  /// 等待缓冲区空间预留的写入范围（仅文件的第一范围）。
+  std::list<io::WriteRange*> write_ranges_;
+
+  /// 索引，用于将写入范围绑定到 write_ranges_ 中的迭代器及其 TmpFile。
+  std::unordered_map<io::WriteRange*, std::pair<std::list<io::WriteRange*>::const_iterator, TmpFile*>>
+      write_ranges_iterator_;
+
+  /// 当前等待预留的写入范围。
+  io::WriteRange* cur_write_range_ = nullptr;
+
+  /// 当前等待预留的写入范围关联的临时文件。
+  std::shared_ptr<TmpFile> cur_tmp_file_;
+
+  /// 用于在没有 TmpFile 的情况下将空间返回到池的虚拟 TmpFile。
+  std::shared_ptr<TmpFile> tmp_file_dummy_;
+
+  /// 如果 TmpFileMgr 正在销毁，则为 true。
+  bool shut_down_ = false;
+
+  /// 用于记录出队等待时间的计时器指标。
+  HistogramMetric* dequeue_timer_metric_ = nullptr;
+
+  /// 辅助函数，用于向池中添加或移除与同一磁盘文件相关的所有写入范围。
+  /// 当缓冲区文件的预留完成后调用该函数时，它将文件的所有范围添加到磁盘队列。
+  /// 如果任何添加失败，则将范围的其他写回函数放入向量 "write_callbacks"，供调用者使用错误状态回调。
+  /// 文件的所有范围都将从池中移除。
+  /// 当写入任务被取消时调用该函数（发生在 TmpFileGroup 关闭时），则 is_cancelled 设置为 true，
+  /// 该函数用于移除池中属于特定 disk_file 的所有范围。
+  /// 调用者应持有 lock_。
+  Status MoveWriteRangesHelper(io::DiskFile* disk_file,
+                               std::vector<TmpFileMgr::WriteDoneCallback>* write_callbacks,
+                               bool is_cancelled);
+
+  /// RemoveWriteRanges() 的内部函数。
+  void RemoveWriteRangesInternal(io::RequestContext* io_ctx,
+                                 std::vector<TmpFileMgr::WriteDoneCallback>* write_callbacks);
+};
+
+}  // namespace impala
+
+#endif
+```
+
 ---
 
 好的，`TmpFileBufferPool` 是 Impala 中一个比较复杂但非常重要的组件，尤其在处理**远程临时文件（如 HDFS 或 S3）的溢出写**时。它的主要作用是**优化临时文件的写入性能和资源管理**，尤其是在涉及到缓冲区（buffer）的分配和回收、以及异步写入操作的协调时。

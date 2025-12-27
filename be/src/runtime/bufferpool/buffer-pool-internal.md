@@ -256,7 +256,12 @@ class BufferPool::Client {
     1：如果page在dirty_unpinned_pages_中，将page从dirty_unpinned_pages_移动到pinned_pages_;
     2: 如果page在in_flight_write_pages中（正在被异步写出），等待page写操作完成。
       2.1：调用cleanPages腾出至少page->len大小的空间。
-          在每次分配或者从page回收一个buffer前都需要调用cleanPages函数，将dirty_unpinned_pages中必要的page（腾出len大小空间）都写到磁盘。以保证buffer pool内部的invariants（不变量）
+          在每次分配或者从page回收一个buffer前都需要调用cleanPages函数，将dirty_unpinned_pages中必要的page（腾出len大小空间）都写到磁盘。以保证buffer pool内部的invariants（不变量）。
+      2.2：如果该page不在BufferPool::Client中，而是已经在BufferPool::BufferAllocator的某个core的FreeBufferArena的某个PerSizeLists的clean_pages链表中
+          2.2.1：将page从2.2步骤的clean_pages链表中移回到BufferPool::Client::pinned_pages.
+          2.2.2: 利用TmpFileGroup::RestoreData（将磁盘文件对应位置打洞，如果不支持打洞，就使用map记录下哪个偏移地址的多长的空间已经空闲）
+      2.3:如果page甚至已经不再2.2中的clean_pages中，已经被从clean_pages被驱逐了（丢弃了）。
+          2.3.1：调用StartMoveEvictedToPinned(&cl, client, page);
   */
   Status StartMoveToPinned(ClientHandle* client, Page* page) WARN_UNUSED_RESULT;
 

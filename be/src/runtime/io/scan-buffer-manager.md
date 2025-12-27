@@ -1,4 +1,213 @@
+```cpp
 
+
+
+
+namespace impala {
+namespace io {
+// 前向声明
+class ScanRange;
+class BufferDescriptor;
+class ScanRangeLockStore;
+
+// ScanRange 的缓冲区管理实现。每个 ScanRange 包含一个就绪缓冲区队列和一个未使用缓冲区队列。对于每个 ScanRange，只有一个生产者和消费者线程，即只有一个磁盘线程会在任何时间向扫描范围scan range推送，并且只有一个线程会从队列中移除。这是为了保证缓冲区按文件顺序入队和读取。
+//
+// 缓冲区生命周期：
+// 磁盘线程将使用来自未使用缓冲区队列unused buffer queue的缓冲区来读取数据。一旦数据被读入缓冲区，它将被放入就绪缓冲区中，消费者线程将使用 ScanRange::GetNext() 读取它。一旦读取完成，消费者将使用 ScanRange::ReturnBuffer() 返回该缓冲区以供重用，它将被添加到未使用缓冲区unused buffer queue中。一旦 ScanRange 完成数据读取或被取消，两队列中的所有剩余缓冲区将被释放。
+class ScanBufferManager {
+ public:
+
+  /// 与使用此缓冲区管理器的扫描范围关联的缓冲区标签。
+  /// 有 3 个标签，每个标签标识用于读取的不同类型的缓冲区：
+  /// a) CLIENT_BUFFER：客户端分配的缓冲区，大小足够容纳整个扫描范围的数据，由调用者在构建扫描范围时提供。
+  ///    此缓冲区是此缓冲区管理器的外部缓冲区，不由其管理
+  ///    即，不分配、释放或不维护在内部队列中。
+  /// b) CACHED_BUFFER：如果扫描范围从 HDFS 缓存读取，则使用缓存的 HDFS 缓冲区。又像 CLIENT_BUFFER 一样，这是此缓冲区管理器的外部缓冲区。
+  /// c) INTERNAL_BUFFER：表示由此缓冲区管理器分配和管理缓冲区。IoMgr 通过 AllocateBuffersForRange() 分配缓冲区，此
+  ///    管理器在内部队列中维护它们。
+  enum class BufferTag { CLIENT_BUFFER, CACHED_BUFFER, INTERNAL_BUFFER };
+
+  /// 为 ScanRange 创建 ScanBufferManager。它将负责相应范围respective range的缓冲区
+  /// 管理。
+  ScanBufferManager(ScanRange* range);
+
+  ~ScanBufferManager();
+
+  void Init();
+
+  /// 将 'buffers' 添加到用于读取数据的缓冲区中。缓冲区被添加到 'unused_iomgr_buffers_' 中。
+  /// 在调用此函数之前，需要使用此缓冲区管理器的扫描范围scan range锁获取锁。
+  /// 如果 'returned' 为 true，则这些是从 ScanRange::GetNext() 返回并通过 ScanRange::ReturnBuffer() 回收的缓冲区。否则，这些是新分配的要添加的缓冲区。
+  /// 如果至少一个缓冲区被添加到 'unused_iomgr_buffers_' 中，则返回 'true'。
+  bool AddUnusedBuffers(const std::unique_lock<std::mutex>& scan_range_lock,
+    std::vector<std::unique_ptr<BufferDescriptor>>&& buffers, bool returned);
+
+  /// 从 'unused_iomgr_buffers_' 中移除一个缓冲区并更新
+  /// 'unused_iomgr_buffer_bytes_'。如果 'unused_iomgr_buffers_' 为空，则返回 nullptr。
+  /// 调用者必须通过 'scan_range_lock' 持有 'scan_range_->lock_'。
+  std::unique_ptr<BufferDescriptor> GetUnusedBuffer(
+      const std::unique_lock<std::mutex>& scan_range_lock);
+
+  /// 将带有有效数据的缓冲区入队到 'ready_buffer_' 中。
+  /// 调用者将缓冲区的所有权传递给缓冲区管理器，此调用之后访问缓冲区无效。在调用此之前，需要获取使用此缓冲区管理器的 ScanRange 的锁。如果 'scan_range_' 已被取消，
+  /// 'buffer' 将被清理而不是入队到 'ready_buffer_' 中。
+  void EnqueueReadyBuffer(const std::unique_lock<std::mutex>& scan_range_lock,
+      std::unique_ptr<BufferDescriptor> buffer);
+
+  /// 为最多 'max_bytes' 个缓冲区分配内存并将其添加到 'buffers' 中。
+  /// 从 ScanRange::AllocateBuffersForRange 调用
+  ///
+  /// 缓冲区大小基于 'scan_range_->len()' 选择。'max_bytes' 必须 >=
+  /// 'min_buffer_size'，以便至少分配一个缓冲区。调用者
+  /// 必须确保 'bp_client' 至少有 'max_bytes' 未使用的预留额度。
+  /// 如果缓冲区成功分配，则返回 ok。
+  Status AllocateBuffersForRange(
+      BufferPool::ClientHandle* bp_client, int64_t max_bytes,
+      std::vector<std::unique_ptr<BufferDescriptor>>& buffers, int64_t min_buffer_size,
+      int64_t max_buffer_size);
+
+  /// 清理不被回收或由客户端返回的缓冲区。
+  /// 调用者必须通过 'scan_range_lock' 持有 'scan_range_->lock_'。
+  /// 此函数可能获取 'scan_range_->file_reader_->lock()'
+  void CleanUpBuffer(const std::unique_lock<std::mutex>& scan_range_lock,
+      const std::unique_ptr<BufferDescriptor> buffer);
+
+  /// 与 CleanUpBuffer() 相同，但清理多个缓冲区。调用者必须
+  /// 通过 'scan_range_lock' 持有 'scan_range_->lock_'。
+  void CleanUpBuffers(const std::unique_lock<std::mutex>& scan_range_lock,
+      std::vector<std::unique_ptr<BufferDescriptor>>&& buffers);
+
+  /// 清理 'unused_iomgr_buffers_' 中的所有缓冲区。只有在扫描
+  /// 范围被取消或到达 eos 时才有效调用。调用者必须通过
+  /// 'scan_range_lock' 持有 'scan_range_->lock_'。
+  void CleanUpUnusedBuffers(const std::unique_lock<std::mutex>& scan_range_lock);
+
+  /// 清理 'ready_buffer_' 中的所有缓冲区。调用者必须通过 'scan_range_lock' 持有 'scan_range_->lock_'。只有在使用此缓冲区管理器的扫描范围
+  /// 被取消时才有效调用。
+  void CleanUpReadyBuffers(const std::unique_lock<std::mutex>& scan_range_lock);
+
+  std::string DebugString() const {
+    std::stringstream ss;
+    ss << " buffer_queue=" << ready_buffers_.size()
+       << " num_buffers_in_readers=" << num_buffers_in_reader_.Load()
+       << " unused_iomgr_buffers=" << unused_iomgr_buffers_.size()
+       << " unused_iomgr_buffer_bytes=" << unused_iomgr_buffer_bytes_;
+    return ss.str();
+  }
+
+  /// 从 'ready_buffer_' 中移除第一个缓冲区并将其分配给 '*buffer'。
+  /// 如果 'ready_buffer_' 为空且 '*buffer' 无法分配，则返回 'false'，
+  /// 否则返回 'true'。
+  /// 在调用此方法之前需要持有 'scan_range_->lock_'。
+  bool PopFirstReadyBuffer(const std::unique_lock<std::mutex>& scan_range_lock,
+      std::unique_ptr<BufferDescriptor>* buffer);
+
+  /// 验证缓冲区状态。验证基于使用此管理器的
+  /// ScanRange 的状态进行。
+  /// 在调用此方法之前，需要通过 'scan_range_lock' 持有 'scan_range_->lock_'。
+  bool Validate(const std::unique_lock<std::mutex>& scan_range_lock);
+
+  void set_cached_buffer() {
+    buffer_tag_ = BufferTag::CACHED_BUFFER;
+  }
+
+  void set_client_buffer() {
+    buffer_tag_ = BufferTag::CLIENT_BUFFER;
+  }
+
+  void set_internal_buffer() {
+    buffer_tag_ = BufferTag::INTERNAL_BUFFER;
+  }
+
+  bool is_cached() const {
+    return buffer_tag_ == BufferTag::CACHED_BUFFER;
+  }
+
+  bool is_client_buffer() const {
+    return buffer_tag_ == BufferTag::CLIENT_BUFFER;
+  }
+
+  bool is_internal_buffer() const {
+    return buffer_tag_ == BufferTag::INTERNAL_BUFFER;
+  }
+
+  BufferTag buffer_tag() const { return buffer_tag_; }
+
+  bool is_readybuffer_empty() const { return ready_buffers_.empty(); }
+
+  int num_buffers_in_reader() const { return num_buffers_in_reader_.Load(); }
+
+  void add_buffers_in_reader(int inc) { num_buffers_in_reader_.Add(inc); }
+
+  void add_iomgr_buffer_cumulative_bytes_used(int inc) {
+    iomgr_buffer_cumulative_bytes_used_ += inc;
+  }
+
+ private:
+
+  /// 使用此缓冲区管理器的扫描范围。
+  ScanRange* const scan_range_;
+
+  /// 已通过 GetNext() 返回给客户端但尚未返回的缓冲区数量。
+  AtomicInt32 num_buffers_in_reader_{0};
+
+  /// 用于读取的缓冲区，如果 'buffer_tag_' 为 INTERNAL_BUFFER。
+  /// 这些缓冲区最初在客户端调用 AllocateBuffersForRange() 时填充
+  /// 并用于读取扫描数据。每次读取时从此向量中取出缓冲区，并在使用后添加回去。
+  std::vector<std::unique_ptr<BufferDescriptor>> unused_iomgr_buffers_;
+
+  /// 'unused_iomgr_buffers_' 中缓冲区的总字节数。
+  int64_t unused_iomgr_buffer_bytes_ = 0;
+
+  /// 由 DoRead() 从 'unused_iomgr_buffers_' 取出的 I/O mgr 缓冲区的累积字节数。
+  /// 用于推断读取扫描范围剩余部分需要保留多少字节的缓冲区。
+  int64_t iomgr_buffer_cumulative_bytes_used_ = 0;
+
+  /// 为此扫描范围排队的 I/O 缓冲区。当调用 Cancel() 时，
+  /// 此队列由取消线程清空。即如果
+  /// 'cancel_status_' 不是 OK，则此队列始终为空。
+  std::deque<std::unique_ptr<BufferDescriptor>> ready_buffers_;
+
+  /// 表示用于读取扫描数据的缓冲区类型的标签。
+  /// 请参阅枚举 'BufferTag' 的注释以获取更多详细信息。
+  BufferTag buffer_tag_;
+
+  /// 为长度为 'scan_range_len' 的扫描范围数据选择缓冲区大小。
+  /// 'min_buffer_size' 和 'max_buffer_size' 是可以
+  /// 分配的最小和最大缓冲区大小。此外，缓冲区大小的累积和不应
+  /// 超过 'max_bytes'。
+  static std::vector<int64_t> ChooseBufferSizes(int64_t scan_range_len,
+      int64_t max_bytes, int64_t min_buffer_size, int64_t max_buffer_size) {
+    DCHECK_GE(max_bytes, min_buffer_size);
+    std::vector<int64_t> buffer_sizes;
+    int64_t bytes_allocated = 0;
+    while (bytes_allocated < scan_range_len) {
+      int64_t bytes_remaining = scan_range_len - bytes_allocated;
+      // 要么分配一个最大大小的缓冲区，要么分配一个较小的缓冲区以适应范围的剩余部分。
+      int64_t next_buffer_size;
+      if (bytes_remaining >= max_buffer_size) {
+        next_buffer_size = max_buffer_size;
+      } else {
+        next_buffer_size =
+            std::max(min_buffer_size, BitUtil::RoundUpToPowerOfTwo(bytes_remaining));
+      }
+      if (next_buffer_size + bytes_allocated > max_bytes) {
+        // 无法分配所需的缓冲区大小。确保至少分配一个
+        // 缓冲区。
+        if (bytes_allocated > 0) break;
+        next_buffer_size = BitUtil::RoundDownToPowerOfTwo(max_bytes);
+      }
+      DCHECK(BitUtil::IsPowerOf2(next_buffer_size)) << next_buffer_size;
+      buffer_sizes.push_back(next_buffer_size);
+      bytes_allocated += next_buffer_size;
+    }
+    return buffer_sizes;
+  }
+};
+}
+}
+```
+-----------------------------------------------------------------------------------
 讲述下这个类的设计思路，我作为文档保存，必要时，结合代码讲述
 
 # ScanBufferManager 类设计思路文档

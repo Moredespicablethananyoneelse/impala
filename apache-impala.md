@@ -14584,7 +14584,8 @@ Status TmpFileGroup::Write(MemRange buffer, WriteDoneCallback cb,
 
 ### 1. 现有设计的分析
 
-`TmpFileGroup::Write` 函æ```cpp
+`TmpFileGroup::Write` 函æ
+```cpp
 Status TmpFileGroup::Write(MemRange buffer, WriteDoneCallback cb,
     unique_ptr<TmpWriteHandle>* handle, const BufferPoolClientCounters* counters) {
   DCHECK_GE(buffer.len(), 0);
@@ -18159,7 +18160,7 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 
 /// All public APIs are thread-safe. It is not valid to call any of the APIs after
 /// UnregisterContext() returns.
-/// 所有公共API都是线程安全的。在UnregisterContext()返回å。
+/// 在UnregisterContext()返回前，所有公共API都是线程安全的。。
 
 /// For Readers:
 /// 对于读取器：
@@ -18177,9 +18178,9 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 ///   2. 每个扫描范围的就绪缓冲区队列：包含已读取并准备好供调用者使用的缓冲区。
 
 /// The disk queue contains a queue of readers and is scheduled in a round robin fashion.
-/// Readers map to scan nodes. The reader then contains a queue of scan ranges. The calhe IoMgr for the next range to process. The IoMgr then selects the best range
+/// Readers map to scan nodes. The reader then contains a queue of scan ranges. The caller asks the IoMgr for the next range to process. The IoMgr then selects the best range
 /// to read based on disk activity and begins reading and queuing buffers for that range.
-/// 磁盘队列包含一个读者队列，按轮询方式调度。读者映射到扫描节点。然后，读者包含
+/// 磁盘队列包含一个读者(RequestContext)队列，按轮询方式调度。读者映射到扫描节点scan  nodes。然后，读者(RequestContext)包含
 /// 一个扫描范围的队列。调用者向IoMgr请求下一个需要处理的范围。IoMgr根据磁盘活动选择
 /// 最佳扫描范围，并开始读取并将缓冲区排队等待该范围。
 
@@ -18195,9 +18196,18 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 /// 分配内存，也不会进行复制。确保待写入数据有效是客户端的责任。如果待写入的文件
 /// 不存在，则会创建该文件。
 
+
 /// For File Operations:
+/// In addition to operations for readers and writers, there is a special operation type
+/// which is the file operation, allows io operations (upload or fetch) on the entire file
+/// between local filesystem and remote filesystem. Each file operation range is enqueued
+/// in the specific file operation queue, and processed by a disk thread for doing the
+/// file operation. After the operation is done, a callback function of the file operation
+/// range is invoked. There is a memory allocation for a block to do the data
+/// transmission, and the memory is released immediately after the operation is done.
+///
 /// 除了读取和写入者的操作外，还有一种特殊的操作类型——文件操作，它允许对整个文件
-/// 进行I/O操作（上传或获取），在本地文件系统和远程文件系ç这种文件操作
+/// 进行I/O操作（上传或获取），在本地文件系统和远程文件系之間，这种文件操作
 /// 范围被加入到特定的文件操作队列中，由磁盘线程处理文件操作。操作完成后，文件操作
 /// 范围中的回调函数会被调用。会为数据传输分配内存块，并在操作完成后立即释放这些内存。
 
@@ -18220,7 +18230,7 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 
 /// The disk threads do not synchronize with each other. The readers and writers don't
 /// synchronize with each other. There is a lock and condition variable for each request
-/// context queue and queue.
+/// context queue and each disk queue.
 /// 磁盘线程之间不进行同步。读取器和写入器之间也不进行同步。每个请求上下文队列和每
 /// 个磁盘队列都有锁和条件变量。
 
@@ -18248,7 +18258,7 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 
 /// The strategy of scheduling is the same for file operation ranges, but the file operation ranges are in a
 /// separate queue compared to read(scan) or write ranges.
-/// 文件操作è«描和写入范围相同，但文件操作范围有自己的独立队列，
+/// 文件操作的调度策略与扫描描和写入范围相同，但文件操作范围有自己的独立队列，
 /// 与读取（扫描）或写入范围的队列分开。
 
 /// Resource Management: the IoMgr is designed to share the available disk I/O capacity
@@ -18260,169 +18270,227 @@ Certainly! Below is the translation of the Apache Impala DiskIOMgr class comment
 /// 可用的I/O能力。IoMgr的接口设计允许客户端管理自己的CPU和内存使用情况，同时IoMgr
 /// 管理不同I/O设备的I/O能力分配，以处理不同客户端的扫描范围。
 
-/// IoMgr clients may want to work on multiple scan ranges at a time to maximize CPU and
-/// I/O utilization. Clients can call RequestContext::Get
 ```
-
-
-NextUnstartedRange() to start asany concurrent scan ranges as required, e.g. from each parallel scanner thread. Once
-/// a scan range has been returned via GetNextUnstartedRange(), the caller must allocate
-/// any memory needed for buffering reads, after which the IoMgr will start to fill
-/// the buffers with data while the caller concurrently consumes and processes the data.
-/// IoMgr客户端可能希望同时处理多个扫描范围，以最大化CPU和I/O的利用率。客户端可以
-/// 调用RequestContext::GetNextUnstartedRange()æª并发扫描范围，例如
-/// 从每个并行扫描线程中。一旦通过GetNextUnstartedRange()返回了一个扫描范围，
-/// 调用者必须为缓冲读取分配所需的内存，此后IoMgr将开始填充缓冲区并同时供调用者处理数据。
-
-/// Buffer Management:
-/// 缓冲区管理：
-
-/// Buffers for reads are either a) allocated on behalf of the caller with
-/// AllocateBuffersForRange() ("IoMgr-allocated"), b) cached HDFS buffers if the scan
-/// range was read from the HDFS cache,r c) a client buffer, large enough to fit the
-/// whole scan range's data, that is provided by the caller when constructing the
-/// scan range.
-/// 读取的缓冲区可以是：a) 通过AllocateBuffersForRange()为调用者分配的（"IoMgr分配"），
-/// b) 如果扫描范围是从HDFS缓存中读取的，则使用缓存的HDFS缓冲区，或者c) 客户端提供的
-/// 足够大的缓冲区，以容纳整个扫描范围的数据，在构建扫描范围时由调用者提供。
-
-/// All three kinds of b wrapped in BufferDescriptors before returning to the
-/// caller. The caller must always call ReturnBuffer() on the buffer descriptor to allow
-/// recycling of the buffer memory and to release any resources associated with the buffer
-/// or scan range.
-/// 所有三种类型的缓冲区在返回给调用者之前都会包装在BufferDescriptors中。调用者必须始终
-/// 在缓冲区描述符上调用ReturnBuffer()，以允许回收缓冲区内存并释放与缓冲区或扫描范围
-/// 相关的任何èa), ReturnBuffer() may re-enqueue the buffer for GetNext() to return again if
-/// needed. E.g. if 24MB of buffers were allocated to read a 64MB scan range, each buffer
-/// must be returned multiple times. Callers must be careful to call ReturnBuffer() with
-/// the previous buffer returned from the range before calling GetNext() so that
-/// at least one buffer is available for the I/O mgr to read data into.
-/// 如果是a)的情况，ReturnBuffer()可能会重新将缓冲区排队以供GetNext()再次返å¼如果分配了24MB的缓冲区来读取64MB的扫描范围，则必须多次返回每个
-/// 缓冲区。调用者必须小心，在调用GetNext()之前，先使用从范围中返回的先前缓冲区调用
-/// ReturnBuffer()，以确保至少有一个缓冲区可供I/O管理器读取数据。
-
-```
-```
-抱歉，看来我没有完全翻译完。接下来我会继续翻译剩余的部分。
 
 ```cpp
-/// If the caller wants to maximize I/O throughput, it can give the range enough memory
-/// for 3 max-sizedfers per scan range. Having two queued buffers (plus the buffer
-/// that is currently being processed by the client) gives good performance in most
-/// scenarios:
-/// 如果调用者希望最大化I/O吞吐量，可以为每个扫描范围提供足够的内存，
-/// 以支持3个最大尺寸的缓冲区。拥有两个排队的缓冲区（加上当前由客户端处理的缓冲区）
-/// 在大多数场景下能提供良好的性能：
+### 原英文注释与中文翻译逐段落对照
 
-/// 1. If the consumer is consuming data faster than we can read from de
-///    queue will be empty most of the time because the buffer will be immediately
-///    pulled off the queue as soon as it is added. There will always be an I/O request
-///    in the disk queue to maximize I/O throughput, which is the bottleneck in this
-///    case.
-/// 1. 如果消费者消费数据的速度比我们从磁盘读取的速度更快，那么队列大部分时间会为空，
-///    因为缓冲区一旦被加入，就会立即从队列中取出。磁盘队列中将始终有I/O请求，以æ    I/O吞吐量，这是瓶颈所在。
+以下是将提供的 C++ 代码注释分解为逻辑段落后的中英文对照显示。每段包括一个英文原段和对应的中文翻译。我尽量保持段落划分的自然性（如主题切换），以便阅读。英文段落以 **English:** 开头，中文以 **中文:** 开头。
 
-/// 2. If we can read from disk faster than the consumer is consuming data, the queue
-///    will fill up and there will always be a buffer available for the consumer to
-///    read, so the consumer will not block and we maximize consumer throughput, which
-///    is the bottleneck in this case.
-/// 2. 如果我们从磁盘读取的速度比消费者消费数据的速度更快，队列将被填满，并且始终会有
-///    一个缓冲区可供消费者读取，è了消费者的吞吐量，这是
-///    这种情况下的瓶颈。
+#### 段落 1: IoMgr 客户端处理多个扫描范围的介绍及示例
+**English:**  
+/// IoMgr clients may want to work on multiple scan ranges at a time to maximize CPU and  
+/// I/O utilization. Clients can call RequestContext::GetNextUnstartedRange() to start as  
+/// many concurrent scan ranges as required, e.g. from each parallel scanner thread. Once  
+/// a scan range has been returned via GetNextUnstartedRange(), the caller must allocate  
+/// any memory needed for buffering reads, after which the IoMgr wil start to fill the  
+/// buffers with data while the caller concurrently consumes and processes the data. For  
+/// example, the logic in a scanner thread might look like:  
+///   while (more_ranges)  
+///     range = context->GetNextUnstartedRange()  
+///     while (!range.eosr)  
+///       buffer = range.GetNext()
 
-/// 3. If the consumer is consuming data at approximately the same rate as we are
-///    reading from disk, then the steady state is that the consumer is processing one
-///    buffer and one buffer is in the disk queue. The additional buffer can absorb
-///    bursts where the producer runs faster than the consumer or the consumer runs
-///    faster than the producer without blocking either the producer or consumer.
-/// 3. 如果消费è°据的速度与我们从磁盘读取的速度大致相同，则稳态是消费者正在处理
-///    一个缓冲区，且一个缓冲区在磁盘队列中。额外的缓冲区可以吸收生产者比消费者运行得
-///    更快或消费者比生产者运行得更快的情况，而不会阻塞生产者或消费者。
+**中文:**  
+/// IoMgr 客户端可能希望同时处理多个扫描范围，以最大化 CPU 和 I/O 利用率。客户端可以调用 RequestContext::GetNextUnstartedRange() 来启动所需的并发扫描范围，例如从每个并行扫描线程中调用。一旦通过 GetNextUnstartedRange() 返回了一个扫描范围，调用者必须为缓冲读取分配所需的任何内存，之后 IoMgr 将开始用数据填充缓冲区，同时调用者并发地消费和处理数据。例如，扫描线程中的逻辑可能如下所示：  
+///   while (more_ranges)  
+///     range = context->GetNextUnstartedRange()  
+///     while (!range.eosr)  
+///       buffer = range.GetNext()
 
+#### 段落 2: IoMgr 负责选择扫描范围的说明
+**English:**  
+/// Note that the IoMgr rather than the client is responsible for choosing which scan  
+/// range to process next, which allows optimizations like distributing load across disks.
+
+**中文:**  
+/// 请注意，IoMgr 而非客户端负责选择下一个要处理的扫描范围，这允许进行优化，例如在磁盘之间分发负载。
+
+#### 段落 3: 缓冲区管理概述
+**English:**  
+/// Buffer Management:  
+/// Buffers for reads are either a) allocated on behalf of the caller with  
+/// AllocateBuffersForRange() ("IoMgr-allocated"), b) cached HDFS buffers if the scan  
+/// range was read from the HDFS cache, or c) a client buffer, large enough to fit the  
+/// whole scan range's data, that is provided by the caller when constructing the  
+/// scan range.
+
+**中文:**  
+/// 缓冲区管理：  
+/// 读取缓冲区有三种类型：a) 通过 AllocateBuffersForRange() 为调用者分配的缓冲区（“IoMgr 分配的”），b) 如果扫描范围从 HDFS 缓存读取，则使用缓存的 HDFS 缓冲区，或者 c) 调用者在构建扫描范围时提供的客户端缓冲区，该缓冲区足够大以容纳整个扫描范围的数据。
+
+#### 段落 4: BufferDescriptor 和 ReturnBuffer 的要求
+**English:**  
+/// All three kinds of buffers are wrapped in BufferDescriptors before returning to the  
+/// caller. The caller must always call ReturnBuffer() on the buffer descriptor to allow  
+/// recycling of the buffer memory and to release any resources associated with the buffer  
+/// or scan range.
+
+**中文:**  
+/// 所有三种缓冲区在返回给调用者之前都会被包装在 BufferDescriptor 中。调用者必须始终调用 ReturnBuffer() 来返回缓冲区描述符，以允许回收缓冲区内存并释放与缓冲区或扫描范围相关的任何资源。
+
+#### 段落 5: IoMgr-allocated 缓冲区的回收逻辑及死锁警告
+**English:**  
+/// In case a), ReturnBuffer() may re-enqueue the buffer for GetNext() to return again if  
+/// needed. E.g. if 24MB of buffers were allocated to read a 64MB scan range, each buffer  
+/// must be returned multiple times. Callers must be careful to call ReturnBuffer() with  
+/// the previous buffer returned from the range before calling GetNext() so that  
+/// at least one buffer is available for the I/O mgr to read data into. Calling GetNext()  
+/// when the scan range has no buffers to read data into causes a resource deadlock.  
+/// NB: if the scan range was allocated N buffers, then it's always ok for the caller  
+/// to hold onto N - 1 buffers, but currently the IoMgr doesn't give the caller a way  
+/// to determine the value of N.
+
+**中文:**  
+/// 在情况 a) 中，ReturnBuffer() 可能会将缓冲区重新入队，以便在需要时通过 GetNext() 再次返回。例如，如果为读取 64MB 扫描范围分配了 24MB 的缓冲区，则每个缓冲区必须被返回多次。调用者必须小心，在调用 GetNext() 之前使用从范围返回的先前缓冲区调用 ReturnBuffer()，以确保至少有一个缓冲区可供 I/O mgr 读取数据。调用 GetNext() 时，如果扫描范围没有可用于读取数据的缓冲区，会导致资源死锁。  
+/// 注意：如果扫描范围分配了 N 个缓冲区，则调用者持有 N - 1 个缓冲区总是安全的，但目前 IoMgr 没有提供一种方法让调用者确定 N 的值。
+
+#### 段落 6: 最大化 I/O 吞吐量的建议及性能场景分析
+**English:**  
+/// If the caller wants to maximize I/O throughput, it can give the range enough memory  
+/// for 3 max-sized buffers per scan range. Having two queued buffers (plus the buffer  
+/// that is currently being processed by the client) gives good performance in most  
+/// scenarios:  
+/// 1. If the consumer is consuming data faster than we can read from disk, then the  
+///    queue will be empty most of the time because the buffer will be immediately  
+///    pulled off the queue as soon as it is added. There will always be an I/O request  
+///    in the disk queue to maximize I/O throughput, which is the bottleneck in this  
+///    case.  
+/// 2. If we can read from disk faster than the consumer is consuming data, the queue  
+///    will fill up and there will always be a buffer available for the consumer to  
+///    read, so the consumer will not block and we maximize consumer throughput, which  
+///    is the bottleneck in this case.  
+/// 3. If the consumer is consuming data at approximately the same rate as we are  
+///    reading from disk, then the steady state is that the consumer is processing one  
+///    buffer and one buffer is in the disk queue. The additional buffer can absorb  
+///    bursts where the producer runs faster than the consumer or the consumer runs  
+///    faster than the producer without blocking either the producer or consumer.  
 /// See IDEAL_MAX_SIZED_BUFFERS_PER_SCAN_RANGE.
-/// 请参阅IDEAL_MAX_SIZED_BUFFERS_PER_SCAN_RANGE。
 
-/// Caching support:
-/// 缓存支持：
+**中文:**  
+/// 如果调用者希望最大化 I/O 吞吐量，它可以为每个扫描范围提供足够的内存用于 3 个最大大小的缓冲区。在大多数场景中，有两个排队的缓冲区（加上当前由客户端处理的缓冲区）可以提供良好的性能：  
+/// 1. 如果消费者消费数据的速度快于从磁盘读取的速度，则队列大部分时间为空，因为缓冲区在添加到队列后会立即被拉出。在这种情况下，磁盘队列中总会有一个 I/O 请求以最大化 I/O 吞吐量，这是瓶颈。  
+/// 2. 如果从磁盘读取的速度快于消费者消费数据的速度，则队列会填满，并且总是有缓冲区可供消费者读取，因此消费者不会阻塞，我们最大化消费者的吞吐量，这是瓶颈。  
+/// 3. 如果消费者消费数据的速度与从磁盘读取的速度大致相同，则稳态是消费者正在处理一个缓冲区，并且一个缓冲区在磁盘队列中。额外的缓冲区可以吸收突发情况，即生产者运行速度快于消费者或消费者运行速度快于生产者，而不会阻塞生产者或消费者。  
+/// 请参阅 IDEAL_MAX_SIZED_BUFFERS_PER_SCAN_RANGE。
 
-/// Scan ranges contain metadata on whether or not it is cached on the DN. In that
-/// case, we use the HDFS APIs to read the cached data without doing any copies. For these
-/// ranges, the reads happen on the caller thread (as opposed to the disk threads).
-/// 扫描范围包含关于数据是否在数据节点上缓存的元数据。如果缓存了数据，我们使用HDFS API
-/// 读取缓存的数据，而不进行任何复制。对于这些范围，读取操作发生在调用者线程上（而不是
-/// 磁盘线程）。
-
-/// It is possible cached read APIs to fail, in which case the ranges are then
-/// queued on the disk threads and behave identically to the case where the range
+#### 段落 7: 缓存支持概述及失败处理
+**English:**  
+/// Caching support:  
+/// Scan ranges contain metadata on whether or not it is cached on the DN. In that  
+/// case, we use the HDFS APIs to read the cached data without doing any copies. For these  
+/// ranges, the reads happen on the caller thread (as opposed to the disk threads).  
+/// It is possible for the cached read APIs to fail, in which case the ranges are then  
+/// queued on the disk threads and behave identically to the case where the range  
 /// is not cached.
-/// 缓存读取API可能会失败，在这种情况下，范围会被排队到磁盘线程中，并表现得与范围未缓存时
-/// 相同。
 
-/// Resources for these ranges are also not accounted against the reader because none
-/// are consumed.
-/// 因为没有消耗这些范围的资源，所以这些范围的资源也不计入读取器。
+**中文:**  
+/// 缓存支持：  
+/// 扫描范围包含元数据，指示它是否在 DN 上缓存。在这种情况下，我们使用 HDFS API 读取缓存数据，而不进行任何复制。对于这些范围，读取发生在调用者线程上（而不是磁盘线程上）。  
+/// 缓存读取 API 可能会失败，在这种情况下，这些范围将被排队到磁盘线程上，并与范围未缓存的情况行为相同。
 
-ile a cached block is being processed, the block is mlocked. We want to minimize
-/// the time the mlock is held.
-/// 在处理缓存块时，该块会被mlock锁定。我们希望最小化锁定mlock的时间。
-
-///   - HDFS will time us out if we hold onto the mlock for too long
-///   - Holding the lock prevents uncaching this file due to a caching policy change.
-///   - 如果我们长时间保持mlock锁定，HDFS会使我们超时。
-///   - 保持锁定会阻止因缓存策略变化而取消缓存该æTherefore, we only issue the cached read when the caller is ready to process the
-/// range (GetNextUnstartedRange()) instead of when the ranges are issued. This guarantees
-/// that there will be a CPU available to process the buffer and any throttling we do with
+#### 段落 8: 缓存资源的会计及 mlock 管理
+**English:**  
+/// Resources for these ranges are also not accounted against the reader because none  
+/// are consumed.  
+/// While a cached block is being processed, the block is mlocked. We want to minimize  
+/// the time the mlock is held.  
+///   - HDFS will time us out if we hold onto the mlock for too long  
+///   - Holding the lock prevents uncaching this file due to a caching policy change.  
+/// Therefore, we only issue the cached read when the caller is ready to process the  
+/// range (GetNextUnstartedRange()) instead of when the ranges are issued. This guarantees  
+/// that there will be a CPU available to process the buffer and any throttling we do with  
 /// the number of scanner threads properly controls the amount of files we mlock.
-/// 因此，我们只有在调用者准备好处理范围时（即调用GetNextUnstartedRange()）才发出缓存读取，
-/// 而不是在范围发布时发出。è¯用于处理缓冲区，并且我们通过调整扫描线程的
-/// 数量来适当地控制mlock文件的数量。
 
-/// With cached scan ranges, we cannot close the scan range until the cached buffer
-/// is returned (HDFS does not allow this). We therefore need to defer the close until
+**中文:**  
+/// 这些范围的资源也不会计入读取器，因为没有消耗任何资源。  
+/// 在处理缓存块时，块会被 mlock。我们希望最小化 mlock 持有时间。  
+///   - 如果我们持有 mlock 太久，HDFS 会超时。  
+///   - 持有锁会阻止由于缓存策略变更而取消缓存该文件。  
+/// 因此，我们仅在调用者准备处理范围时（GetNextUnstartedRange()）发出缓存读取，而不是在发出范围时。这保证了有一个 CPU 可用于处理缓冲区，并且我们通过扫描线程数量进行的任何节流正确控制了我们 mlock 的文件数量。
+
+#### 段落 9: 缓存扫描范围的关闭逻辑
+**English:**  
+/// With cached scan ranges, we cannot close the scan range until the cached buffer  
+/// is returned (HDFS does not allow this). We therefore need to defer the close until  
 /// the cached buffer is returned (ReturnBuffer()).
-/// 对于缓存的扫描范围，在缓存缓冲区返回之前，我们无法关闭扫描范围（HDFS不允许这样做）。
-/// 因此，我们需要延迟关闭ïnBuffer()）。
 
-/// Remote filesystem support (e.g. S3):
-/// 远程文件系统支持（例如S3）：
+**中文:**  
+/// 对于缓存扫描范围，我们不能在返回缓存缓冲区之前关闭扫描范围（HDFS 不允许这样做）。因此，我们需要推迟关闭直到返回缓存缓冲区（ReturnBuffer()）。
 
-/// Remote filesystems are modeled as "remote disks". That is, there is a separate disk
-/// queue for each supported remote filesystem type. In order to maximize throughput,
-/// multiple connections are opened in parallel by having multiple threads running per
-/// queue. Also note that reading from a remote filesystem service can be more CPU
-/// intensive than local disk/hdfs because of non-direct I/O aing, and can
-/// be CPU bottlenecked especially if not enough I/O threads for these queues are
+#### 段落 10: 远程文件系统支持
+**English:**  
+/// Remote filesystem support (e.g. S3):  
+/// Remote filesystems are modeled as "remote disks". That is, there is a seperate disk  
+/// queue for each supported remote filesystem type. In order to maximize throughput,  
+/// multiple connections are opened in parallel by having multiple threads running per  
+/// queue. Also note that reading from a remote filesystem service can be more CPU  
+/// intensive than local disk/hdfs because of non-direct I/O and SSL processing, and can  
+/// be CPU bottlenecked especially if not enough I/O threads for these queues are  
 /// started.
-/// 远程文件系统被建模为“远程磁盘”。也就是说，每个支持的远程文件系统类型都有一个独立的
-/// 磁盘队列。为了最大化吞吐量，通过在每个队列中运行多个线程，打开多个并行连接。同时，
-/// 请注意，从远程文件系统服务读取数据可能比从本地磁盘/HDFS读取更占用CPU资源，因为存在
-/// 非直接I/O和SS这些队列的I/O线程不足时，可能会出现CPU瓶颈。
 
-/// Remote filesystem data caching:
-/// 远程文件系统数据缓存：
+**中文:**  
+/// 远程文件系统支持（例如 S3）：  
+/// 远程文件系统被建模为“远程磁盘”。也就是说，对于每种支持的远程文件系统类型都有一个单独的磁盘队列。为了最大化吞吐量，通过为每个队列运行多个线程来并行打开多个连接。请注意，从远程文件系统服务读取数据可能比本地磁盘/HDFS 更消耗 CPU，因为非直接 I/O 和 SSL 处理，尤其是在为这些队列启动足够的 I/O 线程时可能会成为 CPU 瓶颈。
 
-/// To reduce latency and avoid being network bound when reading from remote filesystems,
-/// a data cache can be optionally enabled (via --data_cache_config) for caching data read
-/// for remote scan ranges on local storage. The cache is independent of file formats.
-/// It's merely caching chunks of file blocks directly on local storage to avoid
-/// fetching them over ase see data-cache.h for details.
-/// 为了减少延迟并避免在读取远程文件系统时被网络绑定，可以选择启用数据缓存（通过
-/// --data_cache_config），用于将读取到的远程扫描范围数据缓存到本地存储中。该缓存与文件格式
-/// 无关，仅仅是将文件块的片段直接缓存到本地存储，以避免通过网络获取它们。有关详细信息，
-/// 请参阅data-cache.h。
+#### 段落 11: 远程文件系统数据缓存
+**English:**  
+/// Remote filesystem data caching:  
+/// To reduce latency and avoid being network bound when reading from remote filesystems,  
+/// a data cache can be optionally enabled (via --data_cache_config) for caching data read  
+/// for remote scan ranges on local storage. The cache is independent of file formats.  
+/// It's merely caching chunks of file blocks directly on local storage to avoid  
+/// fetching them over network. Please see data-cache.h for details.
 
-/// TODO: We should implement more sophisticated resource management. Cuers
-/// are the unit of scheduling and we attempt to distribute IOPS between them. Instead
+**中文:**  
+/// 远程文件系统数据缓存：  
+/// 为了减少延迟并避免在从远程文件系统读取时受网络限制，可以通过 --data_cache_config 可选启用数据缓存，用于在本地存储上缓存为远程扫描范围读取的数据。缓存独立于文件格式。  
+/// 它仅在本地存储上直接缓存文件块的块，以避免通过网络获取它们。请参阅 data-cache.h 以获取详细信息。
+
+#### 段落 12: TODO - 资源管理改进
+**English:**  
+/// TODO: We should implement more sophisticated resource management. Currently readers  
+/// are the unit of scheduling and we attempt to distribute IOPS between them. Instead  
 /// it would be better to have policies based on queries, resource pools, etc.
-/// TODO: 我们应该实现更复杂的资源管理。目前，读取器是调度的单元，我们尝试在它们之间分配
-/// IOPS。更好的方法是基于查询、资源池等制定策略。
 
-/// TODO: IoMgr should be able to request additional scan ranges from the coordinator
+**中文:**  
+/// TODO: 我们应该实现更复杂的资源管理。目前，读取器是调度单位，我们尝试在它们之间分发 IOPS。相反，更好的方法是基于查询、资源池等制定策略。
+
+#### 段落 13: TODO - 请求额外扫描范围
+**English:**  
+/// TODO: IoMgr should be able to request additional scan ranges from the coordinator  
 /// to help deal with stragglers.
-/// TODO: IoMgr应该描范围，以帮助处理滞后者。
+
+**中文:**  
+/// TODO: IoMgr 应该能够从协调器请求额外的扫描范围，以帮助处理落后者。
+
+#### 段落 14: 实现结构
+**English:**  
+/// Structure of the Implementation:  
+///  - All client APIs are defined in this file, request-ranges.h and request-context.h.  
+///    Clients can include only the files that they need.  
+///  - Some internal classes are defined in disk-io-mgr-internal.h  
+///  - ScanRange APIs are implemented in scan-range.cc  
+///    This contains the ready buffer queue logic  
+///  - RequestContext APIs are implemented in request-context.cc  
+///    This contains the logic for picking scan ranges for a reader.  
+///  - Disk Thread and general APIs are implemented in disk-io-mgr.cc.  
+///  - The handle cache is implemented in handle-cache{.inline,}.h
+
+**中文:**  
+/// 实现结构：  
+///  - 所有客户端 API 定义在此文件中、request-ranges.h 和 request-context.h 中。  
+///    客户端只需包含它们需要的文件。  
+///  - 一些内部类定义在 disk-io-mgr-internal.h 中。  
+///  - ScanRange API 在 scan-range.cc 中实现。  
+///    这包含了就绪缓冲区队列逻辑。  
+///  - RequestContext API 在 request-context.cc 中实现。  
+///    这包含了为读取器选择扫描范围的逻辑。  
+///  - 磁盘线程和通用 API 在 disk-io-mgr.cc 中实现。  
+///  - 句柄缓存在 handle-cache{.inline,}.h 中实现。
+
 ```
 
-Now the translation is complete! If you need further assistance or adjustments, feel free to ask!
 ****************************************************************************************************************88
 好的，下面是对该 `FileReader` 类实现部分的注释翻译：
 
@@ -22260,7 +22328,11 @@ Status BufferPool::Client::StartMoveEvictedToPinned(
   page->pin_in_flight.Store(true);
   DCHECK_CONSISTENCY();
   return Status::OK();
-}这个函数调用了TmpFileGroup的ReadAsync接口。代码å TmpFileGroup::ReadAsync(TmpWriteHandle* handle, MemRange buffer) {
+}
+```
+这个函数调用了TmpFileGroup的ReadAsync接口。代码
+```cpp
+å TmpFileGroup::ReadAsync(TmpWriteHandle* handle, MemRange buffer) {
   DCHECK(handle->write_range_ != nullptr);
   DCHECK(!handle->is_cancelled_);
   DCHECK_EQ(buffer.len(), handle->data_len());

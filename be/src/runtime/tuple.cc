@@ -125,7 +125,7 @@ void Tuple::DeepCopyVarlenData(const TupleDescriptor& desc, MemPool* pool) {
     int coll_byte_size = cv->num_tuples * item_desc->byte_size();
     uint8_t* coll_data = reinterpret_cast<uint8_t*>(pool->Allocate(coll_byte_size));
     memcpy(coll_data, cv->ptr, coll_byte_size);
-    cv->ptr = coll_data;
+    cv->ptr = coll_data;  // 我觉得重复使用变量cv-ptr而不是重新定义一个是懒。 见后文coll_value->ptr = tuple_data + offset; string_v->SetPtr(convert_ptrs ? reinterpret_cast<char*>(*offset) : *data);
     if (!item_desc->HasVarlenSlots()) continue;
 
     for (int i = 0; i < cv->num_tuples; ++i) {
