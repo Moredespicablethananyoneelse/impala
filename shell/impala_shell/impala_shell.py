@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
 # Licensed to the Apache Software Foundation (ASF) under one
@@ -168,7 +167,7 @@ class ImpalaShell(cmd.Cmd, object):
   # Message to display when the connection failed and it is reconnecting.
   CONNECTION_LOST_MESSAGE = 'Connection lost, reconnecting...'
   # Message to display when there is an exception when connecting.
-  ERROR_CONNECTING_MESSAGE = "Error connecting"
+  ERROR_CONNECTING_MESSAGE = "Error connecting "
   # Message to display when there is a socket error.
   SOCKET_ERROR_MESSAGE = "Socket error"
   # Message to display upon successful connection to an Impalad
@@ -736,7 +735,7 @@ class ImpalaShell(cmd.Cmd, object):
     for cancel_try in xrange(ImpalaShell.CANCELLATION_TRIES):
       try:
         self.imp_client.is_query_cancelled = True
-        print(ImpalaShell.CANCELLATION_MESSAGE, file=sys.stderr)
+        os.write(sys.stderr.fileno(), ImpalaShell.CANCELLATION_MESSAGE.encode('utf-8'))
         new_imp_client = self._new_impala_client()
         new_imp_client.connect()
         try:
@@ -752,9 +751,9 @@ class ImpalaShell(cmd.Cmd, object):
         if err_msg in ['ERROR: Cancelled', 'ERROR: Invalid or unknown query handle'] or \
           ('\nCancelled' in err_msg or '\nInvalid or unknown query handle' in err_msg):
           break
-        err_details = "Failed to reconnect and close (try %i/%i): %s"
-        print(err_details % (cancel_try + 1, ImpalaShell.CANCELLATION_TRIES, err_msg),
-              file=sys.stderr)
+        err_details = "Failed to reconnect and close (try {}/{}): {}".format(
+            cancel_try + 1, ImpalaShell.CANCELLATION_TRIES, err_msg)
+        os.write(sys.stderr.fileno(), err_details.encode('utf-8'))
 
   def _is_quit_command(self, command):
     # Do a case insensitive check

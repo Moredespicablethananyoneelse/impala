@@ -240,7 +240,7 @@ public class AnalysisContext {
     public boolean isSingleColumnPrivStmt() {
       return isDescribeTableStmt() || isResetMetadataStmt() || isUseStmt()
           || isShowTablesStmt() || isShowMetadataTablesStmt() || isShowViewsStmt()
-          || isAlterTableStmt() || isShowFunctionsStmt();
+          || isAlterTableStmt() || isShowFunctionsStmt() || isShowFilesStmt();
     }
 
     public boolean isConvertTableToIcebergStmt() {
@@ -497,17 +497,6 @@ public class AnalysisContext {
     authzChecker.postAnalyze(authzCtx);
     ImpalaException analysisException = analysisResult_.getException();
 
-    // A statement that returns at most one row does not need to spool query results.
-    // IMPALA-13902: returnsAtMostOneRow should be in planner interface so it is
-    // accessible by the Calcite planner.
-    if (analysisException == null && analysisResult_.getStmt() instanceof SelectStmt &&
-        ((SelectStmt)analysisResult_.getStmt()).returnsAtMostOneRow()) {
-      clientRequest.query_options.setSpool_query_results(false);
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("Result spooling is disabled due to the statement returning at most "
-            + "one row.");
-      }
-    }
     long durationMs = timeline_.markEvent("Analysis finished") / 1000000;
     LOG.info("Analysis took {} ms", durationMs);
 
@@ -722,6 +711,11 @@ public class AnalysisContext {
       return canRewriteStatement() && isZippingUnnestInSelectList(stmt_);
     }
     public boolean requiresExprRewrite() {
+      // For ShowStatsStmt, only require rewrite if there's a WHERE clause
+      if (isShowStatsStmt()) {
+        ShowStatsStmt showStatsStmt = (ShowStatsStmt) stmt_;
+        return showStatsStmt.hasWhereClause();
+      }
       return isQueryStmt() || isInsertStmt() || isCreateTableAsSelectStmt()
           || isUpdateStmt() || isDeleteStmt() || isOptimizeStmt() || isMergeStmt();
     }
@@ -736,6 +730,7 @@ public class AnalysisContext {
     public boolean isShowCreateTableStmt() {
       return stmt_ instanceof ShowCreateTableStmt;
     }
+    public boolean isShowStatsStmt() { return stmt_ instanceof ShowStatsStmt; }
     public boolean isQueryStmt() { return stmt_ instanceof QueryStmt; }
     public boolean isInsertStmt() { return stmt_ instanceof InsertStmt; }
     public boolean isMergeStmt() { return stmt_ instanceof MergeStmt; }

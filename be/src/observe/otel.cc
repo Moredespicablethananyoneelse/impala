@@ -28,7 +28,7 @@
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
-#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 #include <gutil/strings/split.h>
 #include <opentelemetry/exporters/otlp/otlp_file_exporter.h>
@@ -39,6 +39,8 @@
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_factory.h>
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_options.h>
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_runtime_options.h>
+#include <opentelemetry/nostd/shared_ptr.h>
+#include <opentelemetry/sdk/common/global_log_handler.h>
 #include <opentelemetry/sdk/resource/resource.h>
 #include <opentelemetry/sdk/trace/batch_span_processor.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_factory.h>
@@ -54,16 +56,16 @@
 #include <opentelemetry/version.h>
 
 #include "common/compiler-util.h"
-#include "common/status.h"
 #include "common/version.h"
 #include "gen-cpp/Query_types.h"
-#include "observe/otel-instrument.h"
+#include "observe/otel-log-handler.h"
 #include "observe/span-manager.h"
 #include "service/client-request-state.h"
 
 using namespace boost::algorithm;
 using namespace opentelemetry;
 using namespace opentelemetry::exporter::otlp;
+using namespace opentelemetry::sdk::common::internal_log;
 using namespace opentelemetry::sdk::trace;
 using namespace std;
 
@@ -72,7 +74,6 @@ DECLARE_string(otel_trace_additional_headers);
 DECLARE_int32(otel_trace_batch_queue_size);
 DECLARE_int32(otel_trace_batch_max_batch_size);
 DECLARE_int32(otel_trace_batch_schedule_delay_ms);
-DECLARE_bool(otel_trace_beeswax);
 DECLARE_string(otel_trace_ca_cert_path);
 DECLARE_string(otel_trace_ca_cert_string);
 DECLARE_string(otel_trace_collector_url);
@@ -107,6 +108,9 @@ static const regex query_newline(
     "(select|alter|compute|create|delete|drop|insert|invalidate|update|with)\\s*"
     "(\n|\\s*\\\\*\\/)", regex::icase | regex::optimize | regex::nosubs);
 
+// Holds the custom log handler for OpenTelemetry internal logs.
+static nostd::shared_ptr<LogHandler> otel_log_handler_;
+
 // Lambda function to check if SQL starts with relevant keywords for tracing
 static const function<bool(std::string_view)> is_traceable_sql =
     [](std::string_view sql_str) -> bool {
@@ -133,17 +137,12 @@ static unique_ptr<trace::TracerProvider> provider_;
 
 // Returns true if any TLS configuration flags are set for the OTel exporter.
 static inline bool otel_tls_enabled() {
-  return !FLAGS_otel_trace_ca_cert_path.empty()
-      || !FLAGS_otel_trace_ca_cert_string.empty()
-      || !FLAGS_otel_trace_tls_minimum_version.empty()
-      || !FLAGS_otel_trace_ssl_ciphers.empty()
-      || !FLAGS_otel_trace_tls_cipher_suites.empty()
-      || FLAGS_otel_trace_collector_url.find("https://") == 0;
+  return boost::algorithm::istarts_with(FLAGS_otel_trace_collector_url, "https://");
 } // function otel_tls_enabled
 
 bool should_otel_trace_query(std::string_view sql,
     const TSessionType::type& session_type) {
-  if (LIKELY(!FLAGS_otel_trace_beeswax) && session_type == TSessionType::BEESWAX) {
+  if (UNLIKELY(session_type == TSessionType::BEESWAX)) {
     return false;
   }
 
@@ -197,12 +196,9 @@ bool should_otel_trace_query(std::string_view sql,
   return false;
 } // function should_otel_trace_query
 
-// Initializes an OtlpHttpExporter instance with configuration from global flags. The
-// OtlpHttpExporter instance implements the SpanExporter interface. The function parameter
-// `exporter` is an in-out parameter that will be populated with the created
-// OtlpHttpExporter instance. Returns Status::OK() on success, or an error Status if
-// configuration fails.
-static Status init_exporter_http(unique_ptr<SpanExporter>& exporter) {
+// Creates an OtlpHttpExporterOptions struct instance with configuration from global
+// startup flags.
+static OtlpHttpExporterOptions http_exporter_config() {
   // Configure OTLP HTTP exporter
   OtlpHttpExporterOptions opts;
   opts.url = FLAGS_otel_trace_collector_url;
@@ -227,15 +223,20 @@ static Status init_exporter_http(unique_ptr<SpanExporter>& exporter) {
 
   // TLS Configurations
   if (otel_tls_enabled()) {
+    // Set minimum TLS version to the value of the global ssl_minimum_version flag.
+    // Since this flag is in the format "tlv1.2" or "tlsv1.3", we need to
+    // convert it to the format expected by OtlpHttpExporterOptions by removing the
+    // "tlsv" prefix.
     if (FLAGS_otel_trace_tls_minimum_version.empty()) {
-      // Set minimum TLS version to the value of the global ssl_minimum_version flag.
-      // Since this flag is in the format "tlv1.2" or "tlsv1.3", we need to
-      // convert it to the format expected by OtlpHttpExporterOptions.
       if (!FLAGS_ssl_minimum_version.empty()) {
-        opts.ssl_min_tls = FLAGS_ssl_minimum_version.substr(4); // Remove "tlsv" prefix
+        opts.ssl_min_tls = FLAGS_ssl_minimum_version.substr(4);
+      } else {
+        LOG(WARNING) << "TLS is enabled for the OTel exporter, but neither the "
+            "'ssl_minimum_version' nor the 'otel_trace_tls_minimum_version' flags are "
+            "set.";
       }
     } else {
-      opts.ssl_min_tls = FLAGS_otel_trace_tls_minimum_version;
+      opts.ssl_min_tls = FLAGS_otel_trace_tls_minimum_version.substr(4);
     }
 
     opts.ssl_insecure_skip_verify = FLAGS_otel_trace_tls_insecure_skip_verify;
@@ -246,6 +247,10 @@ static Status init_exporter_http(unique_ptr<SpanExporter>& exporter) {
         FLAGS_otel_trace_ssl_ciphers;
     opts.ssl_cipher_suite = FLAGS_otel_trace_tls_cipher_suites.empty() ?
         FLAGS_tls_ciphersuites : FLAGS_otel_trace_tls_cipher_suites;
+
+    VLOG(2) << "OTel minimum TLS version set to '" << opts.ssl_min_tls << "'";
+    VLOG(2) << "OTel TLS 1.2 allowed ciphers set to '" << opts.ssl_cipher << "'";
+    VLOG(2) << "OTel TLS 1.3 allowed ciphers set to '" << opts.ssl_cipher_suite << "'";
   }
 
   // Additional HTTP headers
@@ -260,17 +265,21 @@ static Status init_exporter_http(unique_ptr<SpanExporter>& exporter) {
     }
   }
 
-  if (FLAGS_otel_debug) {
-    opentelemetry::v1::exporter::otlp::OtlpHttpExporterRuntimeOptions runtime_opts;
-    runtime_opts.thread_instrumentation =
-        make_shared<LoggingInstrumentation>("http_exporter");
-    exporter = OtlpHttpExporterFactory::Create(opts, runtime_opts);
-  } else {
-    exporter = OtlpHttpExporterFactory::Create(opts);
-  }
+  return opts;
+} // function http_exporter_config
 
-  return Status::OK();
-} // function init_exporter_http
+// Creates a BatchSpanProcessorOptions struct instance with configuration from global
+// startup flags.
+static BatchSpanProcessorOptions batch_processor_config() {
+  BatchSpanProcessorOptions batch_opts;
+
+  batch_opts.max_queue_size = FLAGS_otel_trace_batch_queue_size;
+  batch_opts.max_export_batch_size = FLAGS_otel_trace_batch_max_batch_size;
+  batch_opts.schedule_delay_millis =
+      chrono::milliseconds(FLAGS_otel_trace_batch_schedule_delay_ms);
+
+  return batch_opts;
+} // function batch_processor_config
 
 // Initializes an OtlpFileExporter instance with configuration from global flags. The
 // OtlpFileExporter instance implements the SpanExporter interface. Returns a unique_ptr
@@ -295,46 +304,31 @@ static unique_ptr<SpanExporter> init_exporter_file() {
   return OtlpFileExporterFactory::Create(exporter_opts);
 } // function init_exporter_file
 
-// Initializes the OpenTelemetry Tracer singleton with the configuration defined in the
-// coordinator startup flags. Returns Status::OK() on success, or an error Status if
-// configuration fails.
-Status init_otel_tracer() {
-  LOG(INFO) << "Initializing OpenTelemetry tracing.";
-  VLOG(2) << "OpenTelemetry version: " << OPENTELEMETRY_VERSION;
-  VLOG(2) << "OpenTelemetry ABI version: " << OPENTELEMETRY_ABI_VERSION;
-  VLOG(2) << "OpenTelemetry namespace: "
-      << OPENTELEMETRY_STRINGIFY(OPENTELEMETRY_NAMESPACE);
-
+// Initializes a SpanExporter instance based on the FLAGS_otel_trace_exporter flag.
+// Returns a unique_ptr which will always be initialized with the created exporter.
+static unique_ptr<SpanExporter> init_exporter() {
   unique_ptr<SpanExporter> exporter;
 
   if(FLAGS_otel_trace_exporter == OTEL_EXPORTER_OTLP_HTTP) {
-    RETURN_IF_ERROR(init_exporter_http(exporter));
+    exporter = OtlpHttpExporterFactory::Create(http_exporter_config());
   } else {
     exporter = init_exporter_file();
   }
   VLOG(2) << "OpenTelemetry exporter: " << FLAGS_otel_trace_exporter;
 
-  // Set up tracer provider
+  return exporter;
+} // function init_exporter
+
+// Initializes a SpanProcessor instance based on the FLAGS_otel_trace_span_processor flag.
+// Returns a unique_ptr which will always be initialized with the created processor.
+static unique_ptr<SpanProcessor> init_span_processor() {
+  unique_ptr<SpanExporter> exporter = init_exporter();
   unique_ptr<SpanProcessor> processor;
 
   if (boost::iequals(trim_copy(FLAGS_otel_trace_span_processor), SPAN_PROCESSOR_BATCH)) {
     VLOG(2) << "Using BatchSpanProcessor for OpenTelemetry spans";
-    BatchSpanProcessorOptions batch_opts;
-
-    batch_opts.max_queue_size = FLAGS_otel_trace_batch_queue_size;
-    batch_opts.max_export_batch_size = FLAGS_otel_trace_batch_max_batch_size;
-    batch_opts.schedule_delay_millis =
-        chrono::milliseconds(FLAGS_otel_trace_batch_schedule_delay_ms);
-
-    if (FLAGS_otel_debug) {
-      BatchSpanProcessorRuntimeOptions runtime_opts;
-      runtime_opts.thread_instrumentation =
-          make_shared<LoggingInstrumentation>("batch_span_processor");
-      processor = BatchSpanProcessorFactory::Create(move(exporter), batch_opts,
-          runtime_opts);
-    } else {
-      processor = BatchSpanProcessorFactory::Create(move(exporter), batch_opts);
-    }
+    processor = BatchSpanProcessorFactory::Create(move(exporter),
+        batch_processor_config());
   } else {
     VLOG(2) << "Using SimpleSpanProcessor for OTel spans";
     LOG(WARNING) << "Setting --otel_trace_span_processor=simple blocks the query "
@@ -343,13 +337,37 @@ Status init_otel_tracer() {
     processor = make_unique<SimpleSpanProcessor>(move(exporter));
   }
 
-  provider_ = TracerProviderFactory::Create(move(processor),
+  return processor;
+} // function init_span_processor
+
+// Initializes the OpenTelemetry Tracer singleton with the configuration defined in the
+// coordinator startup flags. This tracer is stored in a static variabled defined in this
+// file.
+void init_otel_tracer() {
+  LOG(INFO) << "Initializing OpenTelemetry tracing.";
+  VLOG(2) << "OpenTelemetry version: " << OPENTELEMETRY_VERSION;
+  VLOG(2) << "OpenTelemetry ABI version: " << OPENTELEMETRY_ABI_VERSION;
+  VLOG(2) << "OpenTelemetry namespace: "
+      << OPENTELEMETRY_STRINGIFY(OPENTELEMETRY_NAMESPACE);
+
+  otel_log_handler_ = nostd::shared_ptr<LogHandler>(new OtelLogHandler());
+  GlobalLogHandler::SetLogHandler(otel_log_handler_);
+
+  // Set the OpenTelemetry SDK internal log level based on the current glog level. The SDK
+  // does not support changing the log level once a Provider has been created.
+  if (FLAGS_otel_debug) {
+    GlobalLogHandler::SetLogLevel(LogLevel::Debug);
+  } else if (VLOG_IS_ON(1)) {
+    GlobalLogHandler::SetLogLevel(LogLevel::Info);
+  } else {
+    GlobalLogHandler::SetLogLevel(LogLevel::None);
+  }
+
+  provider_ = TracerProviderFactory::Create(init_span_processor(),
       sdk::resource::Resource::Create({
         {"service.name", "Impala"},
         {"service.version", GetDaemonBuildVersion()}
       }));
-
-  return Status::OK();
 } // function init_otel_tracer
 
 void shutdown_otel_tracer() {
@@ -367,5 +385,28 @@ shared_ptr<SpanManager> build_span_manager(ClientRequestState* crs) {
   return make_shared<SpanManager>(
       provider_->GetTracer(SCOPE_SPAN_NAME, SCOPE_SPAN_SPEC_VERSION), crs);
 } // function build_span_manager
+
+namespace test {
+bool otel_tls_enabled_for_testing() {
+  return otel_tls_enabled();
+}
+
+OtlpHttpExporterOptions get_http_exporter_config() {
+  return http_exporter_config();
+}
+
+BatchSpanProcessorOptions get_batch_processor_config() {
+  return batch_processor_config();
+}
+
+unique_ptr<SpanExporter> get_exporter() {
+  return init_exporter();
+}
+
+unique_ptr<SpanProcessor> get_span_processor() {
+  return init_span_processor();
+}
+
+} // namespace test
 
 } // namespace impala

@@ -60,7 +60,9 @@ foreach(PYTHON_EXE IN LISTS PYTHON_EXES)
   # different distributions
   add_custom_target(${PYTHON_NAME}_venv
     BYPRODUCTS "${VENV}"
-    DEPENDS impala_python
+    # IMPALA-14606: create_virtualenv.sh may invoke impala-virtualenv, which require
+    # python2_venv. Only uncomment following line if building python2_venv.
+    # DEPENDS impala_python
     COMMAND "${CMAKE_SOURCE_DIR}/bin/cmake_aux/create_virtualenv.sh"
             "${PYTHON_EXE}" "${VENV}"
     COMMAND "${VENV}/bin/pip" install --cache-dir "${PIP_CACHE}" --upgrade pip
@@ -75,7 +77,8 @@ add_custom_target(shell_impala_build_version
   COMMAND "${CMAKE_SOURCE_DIR}/shell/gen_impala_build_version.sh"
 )
 
-add_custom_target(shell_pypi_package DEPENDS gen-deps shell_impala_build_version impala_python
+add_custom_target(shell_pypi_package
+  DEPENDS gen-deps shell_impala_build_version impala_python3
   COMMAND "${CMAKE_SOURCE_DIR}/shell/packaging/make_python_package.sh"
 )
 
@@ -88,16 +91,18 @@ set(SHELL_TEST_PKG
   "${CMAKE_SOURCE_DIR}/shell/build/dist/impala_shell-${PKG_VERSION}.tar.gz")
 get_filename_component(SHELL_TEST_PKG_DIR "${SHELL_TEST_PKG}" DIRECTORY)
 # Generates SHELL_TEST_PKG
-add_custom_target(shell_pypi_test_package DEPENDS gen-deps shell_impala_build_version impala_python
+add_custom_target(shell_pypi_test_package
+  DEPENDS gen-deps shell_impala_build_version impala_python3
   COMMAND env BUILD_VERSION=${PKG_VERSION} OFFICIAL=true DIST_DIR="${SHELL_TEST_PKG_DIR}"
     "${CMAKE_SOURCE_DIR}/shell/packaging/make_python_package.sh"
 )
 
 # Tests expect to find venvs at 'python2_venv' and 'python3_venv' in tests/shell/util.py.
-set(PYTHON2_VENV "${VENV_LOC}/python2_venv")
-add_custom_target(shell_python2_install DEPENDS python2_venv shell_pypi_test_package
-  COMMAND "${PYTHON2_VENV}/bin/pip" install --cache-dir "${PIP_LOC}/python2" "${SHELL_TEST_PKG}"
-)
+# IMPALA-14606: Stop building 'python2_venv' and always run with IMPALA_USE_PYTHON3_TESTS=true.
+# set(PYTHON2_VENV "${VENV_LOC}/python2_venv")
+# add_custom_target(shell_python2_install DEPENDS python2_venv shell_pypi_test_package
+#   COMMAND "${PYTHON2_VENV}/bin/pip" install --cache-dir "${PIP_LOC}/python2" "${SHELL_TEST_PKG}"
+# )
 
 set(PYTHON3_VENV "${VENV_LOC}/python3_venv")
 add_custom_target(shell_python3_install DEPENDS python3_venv shell_pypi_test_package

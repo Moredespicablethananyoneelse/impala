@@ -130,7 +130,9 @@ DEFINE_bool(fallback_to_hms_on_errors, true, "This configuration is only used if
 DEFINE_bool(invalidate_hms_cache_on_ddls, true, "This configuration is used "
     "only if start_hms_server is true. This is used to invalidate catalogd cache "
     "for non transactional tables if alter/create/delete table hms apis are "
-     "invoked over catalogd's metastore endpoint");
+    "invoked over catalogd's metastore endpoint. Note that when this flag is false, the "
+    "catalogd cache could still be updated by the event processor if "
+    "hms_event_polling_interval_s is greater than 0");
 
 DEFINE_bool(hms_event_incremental_refresh_transactional_table, true, "When set to true "
     "events processor will refresh transactional tables incrementally for partition "
@@ -258,7 +260,7 @@ DEFINE_string(common_hms_event_types, "ADD_PARTITION,ALTER_PARTITION,DROP_PARTIT
     "ALTER_SCHEMA_VERSION, DROP_SCHEMA_VERSION, CREATE_CATALOG, ALTER_CATALOG,"
     "DROP_CATALOG, CREATE_DATACONNECTOR, ALTER_DATACONNECTOR, DROP_DATACONNECTOR.");
 
-DEFINE_bool(enable_hierarchical_event_processing, false,
+DEFINE_bool(enable_hierarchical_event_processing, true,
     "This configuration is used to enable hierarchical event processing. The default "
     "value is false. When enabled, events are fetched, dispatched and processed in "
     "different threads.");
@@ -317,6 +319,12 @@ DEFINE_bool(keeps_warmup_tables_loaded, false,
 DEFINE_bool(truncate_external_tables_with_hms, true, "Always use HMS to truncate"
     "external tables. When false, HMS api is only used for tables being replicated. Using"
     "HMS has the effect of deleting files recursively and triggering an HMS event.");
+
+DEFINE_bool(disable_hms_sync_by_default, false, "Catalogd flag that globally skips "
+    "HiveMetastore (HMS) event processing by default. If 'true', events are skipped for"
+    "all objects (with the exception to database level events) unless "
+    "'impala.disableHmsSync' is explicitly set to 'false' on a database or table."
+    "This simplifies rolling out event processing job-by-job.");
 
 DECLARE_string(state_store_host);
 DECLARE_int32(state_store_port);

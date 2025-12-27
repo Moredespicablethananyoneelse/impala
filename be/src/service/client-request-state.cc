@@ -388,6 +388,12 @@ Status ClientRequestState::Exec() {
       DCHECK(exec_req.__isset.kill_query_request);
       LOG_AND_RETURN_IF_ERROR(ExecKillQueryRequest());
       break;
+    case TStmtType::NO_OP:
+      if (exec_req.__isset.noop_result) {
+        SetResultSet(exec_req.noop_result);
+      }
+      return Status::OK();
+      break;
     default:
       return Status(Substitute("Unknown exec request stmt type: $0", exec_req.stmt_type));
   }
@@ -568,8 +574,16 @@ Status ClientRequestState::ExecLocalCatalogOp(
     }
     case TCatalogOpType::SHOW_CREATE_TABLE: {
       string response;
-      RETURN_IF_ERROR(frontend_->ShowCreateTable(catalog_op.show_create_table_params,
-          &response));
+      bool with_stats = false;
+      if (catalog_op.__isset.show_create_table_with_stats) {
+        with_stats = catalog_op.show_create_table_with_stats;
+      }
+      int32_t partition_limit = query_options().show_create_table_partition_limit; // Default value
+      if (catalog_op.__isset.show_create_table_partition_limit) {
+        partition_limit = catalog_op.show_create_table_partition_limit;
+      }
+      RETURN_IF_ERROR(frontend_->ShowCreateTable(
+          catalog_op.show_create_table_params, with_stats, partition_limit, &response));
       SetResultSet(vector<string>(1, response));
       return Status::OK();
     }
@@ -663,10 +677,42 @@ void ClientRequestState::FinishExecQueryOrDmlRequest() {
     otel_span_manager_->StartChildSpanAdmissionControl();
   }
 
+  const TQueryExecRequest* query_exec_request;
+  TQueryExecRequest req;
+  if (ExecEnv::GetInstance()->AdmissionServiceEnabled()) {
+    req = exec_req.query_exec_request;
+    if (req.__isset.query_plan) {
+      // Use the swap() to ensure the string's memory is deallocated.
+      // Using clear() sets the size to 0 but may not release the capacity.
+      std::string().swap(req.query_plan);
+      req.__isset.query_plan = false;
+    }
+    if (req.__isset.lineage_graph) {
+      req.lineage_graph = TLineageGraph();
+      req.__isset.lineage_graph = false;
+    }
+    if (req.__isset.result_set_metadata) {
+      req.result_set_metadata = TResultSetMetadata();
+      req.__isset.result_set_metadata = false;
+    }
+    if (req.__isset.finalize_params) {
+      req.finalize_params = TFinalizeParams();
+      req.__isset.finalize_params = false;
+    }
+    TClientRequest& client_req = req.query_ctx.client_request;
+    if (client_req.__isset.redacted_stmt) {
+      // Use the swap() to ensure the string's memory is deallocated.
+      std::string().swap(client_req.redacted_stmt);
+      client_req.__isset.redacted_stmt = false;
+    }
+    query_exec_request = &req;
+  } else {
+    query_exec_request = &exec_req.query_exec_request;
+  }
+
   Status admit_status = admission_control_client_->SubmitForAdmission(
-      {query_id_pb, ExecEnv::GetInstance()->backend_id(),
-          exec_req.query_exec_request, exec_req.query_options,
-          summary_profile_, blacklisted_executor_addresses_},
+      {query_id_pb, ExecEnv::GetInstance()->backend_id(), *query_exec_request,
+          exec_req.query_options, summary_profile_, blacklisted_executor_addresses_},
       query_events_, &schedule_, &wait_start_time_ms_, &wait_end_time_ms_,
       otel_span_manager_.get());
 
@@ -1424,8 +1470,11 @@ void ClientRequestState::UpdateNonErrorExecState(ExecState new_state) {
       // valid to transition from ERROR to FINISHED, so skip any attempt to do so.
       if (old_state != ExecState::ERROR) {
         // A query can transition from PENDING to FINISHED if it is cancelled by the
-        // client.
-        DCHECK(old_state == ExecState::PENDING || old_state == ExecState::RUNNING)
+        // client. NO_OP statements can also transition from INITIALIZED to FINISHED.
+        bool valid_transition =
+            old_state == ExecState::PENDING || old_state == ExecState::RUNNING
+            || (stmt_type() == TStmtType::NO_OP && old_state == ExecState::INITIALIZED);
+        DCHECK(valid_transition)
             << Substitute(error_msg, ExecStateToString(old_state),
                 ExecStateToString(new_state), PrintId(query_id()));
         UpdateExecState(new_state);

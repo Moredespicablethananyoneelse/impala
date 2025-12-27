@@ -169,7 +169,7 @@ public class ExecRequestCreator implements CompilerStep {
 
     TRuntimeProfileNode calciteProfile =
         this.queryCtx.getFrontend().createTRuntimeProfileNode(Frontend.PLANNER_PROFILE);
-    this.queryCtx.getFrontend().addPlannerToProfile("CalcitePlanner");
+    this.queryCtx.getFrontend().addPlannerToProfile("CalcitePlanner", null);
     result.setProfile(FrontendProfile.getCurrent().emitAsThrift());
     result.setProfile_children(FrontendProfile.getCurrent().emitChildrenAsThrift());
     if (isExplain) {
@@ -250,7 +250,7 @@ public class ExecRequestCreator implements CompilerStep {
     rootFragment.verifyTree();
 
     List<Expr> resultExprs = outputExprs;
-    rootFragment.setSink(new PlanRootSink(resultExprs));
+    rootFragment.setSink(PlanRootSink.create(ctx, resultExprs, true));
 
     Planner.checkForDisableCodegen(rootFragment.getPlanRoot(), ctx);
     // finalize exchanges: this ensures that for hash partitioned joins, the partitioning
@@ -427,8 +427,8 @@ public class ExecRequestCreator implements CompilerStep {
   @Override
   public void logDebug(Object resultObject) {
     if (!(resultObject instanceof TExecRequest)) {
-      LOG.debug("Finished create exec request step, but unknown result: " + resultObject);
+      LOG.debug("Finished exec request step, but unknown result: {}", resultObject);
     }
-    LOG.debug("Exec request: " + resultObject);
+    LOG.debug("Exec request: {}", resultObject);
   }
 }

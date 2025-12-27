@@ -73,9 +73,9 @@ import org.apache.impala.catalog.HdfsTable;
 import org.apache.impala.catalog.Hive3MetastoreShimBase;
 import org.apache.impala.catalog.MetaStoreClientPool;
 import org.apache.impala.catalog.MetaStoreClientPool.MetaStoreClient;
-import org.apache.impala.catalog.events.MetastoreEvents.DerivedMetastoreEvent;
-import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEvent;
-import org.apache.impala.catalog.events.MetastoreEvents.MetastoreTableEvent;
+import org.apache.impala.catalog.events.MetastoreEvents.DerivedMetastoreEventContext;
+import org.apache.impala.catalog.events.MetastoreEvents.DerivedMetastoreTableEvent;
+import org.apache.impala.catalog.events.MetastoreEvents.IgnoredEvent;
 import org.apache.impala.catalog.events.MetastoreEventsProcessor.MetaDataFilter;
 import org.apache.impala.catalog.events.MetastoreNotificationException;
 import org.apache.impala.catalog.events.SelfEventContext;
@@ -631,38 +631,17 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
   /**
    * CDP Hive-3 only function.
    */
-  public static class CommitTxnEvent extends MetastoreEvent {
+  public static class CommitTxnEvent extends IgnoredEvent {
     public static final String EVENT_TYPE = "COMMIT_TXN";
 
     public CommitTxnEvent(CatalogOpExecutor catalogOpExecutor, Metrics metrics,
         NotificationEvent event) {
       super(catalogOpExecutor, metrics, event);
-      throw new UnsupportedOperationException("CommitTxnEvent is not supported.");
     }
 
     @Override
-    protected void process() throws MetastoreNotificationException {
-
-    }
-
-    @Override
-    protected boolean onFailure(Exception e) {
-      return false;
-    }
-
-    @Override
-    protected boolean isEventProcessingDisabled() {
-      return false;
-    }
-
-    @Override
-    protected SelfEventContext getSelfEventContext() {
-      return null;
-    }
-
-    @Override
-    protected boolean shouldSkipWhenSyncingToLatestEventId() {
-      return false;
+    public void process() {
+      LOG.info("Ignoring COMMIT_TXN event {}", getEventId());
     }
   }
 
@@ -671,13 +650,11 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
    * dummy implementation class defined in this file becomes actual implementation. Need
    * to change when CommitTxnEvent implementation is supported with IMPALA-13285.
    */
-  public static class PseudoCommitTxnEvent extends MetastoreTableEvent
-      implements DerivedMetastoreEvent {
-    PseudoCommitTxnEvent(CommitTxnEvent actualEvent, String dbName, String tableName,
-        boolean isPartitioned, boolean isMaterializedView, List<Long> writeIds,
-        List<Partition> partitions) {
-      super(actualEvent.getCatalogOpExecutor(), actualEvent.getMetrics(),
-          actualEvent.getEvent());
+  public static class PseudoCommitTxnEvent extends DerivedMetastoreTableEvent {
+    PseudoCommitTxnEvent(DerivedMetastoreEventContext context, String dbName,
+        String tableName, boolean isPartitioned, boolean isMaterializedView,
+        List<Long> writeIds, List<Partition> partitions) {
+      super(context);
       throw new UnsupportedOperationException("PseudoCommitTxnEvent is not supported.");
     }
 
@@ -1045,6 +1022,7 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
    */
   public static List<PseudoCommitTxnEvent> getPseudoCommitTxnEvents(
       CommitTxnEvent event) {
-    throw new UnsupportedOperationException("CommitTxnEvent is not supported.");
+    LOG.info("Ignoring COMMIT_TXN event {}", event.getEventId());
+    return Collections.emptyList();
   }
 }

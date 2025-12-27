@@ -480,6 +480,10 @@ class CustomClusterTestSuite(ImpalaTestSuite):
   @staticmethod
   def _restart_kudu_service(kudu_args=None):
     kudu_env = dict(os.environ)
+    # On some platforms, Kudu can get stuck when HEAPCHECK is set (even to an empty
+    # value). Drop any HEAPCHECK variable from the environment.
+    if "HEAPCHECK" in kudu_env:
+      del kudu_env["HEAPCHECK"]
     if kudu_args is not None:
       kudu_env["IMPALA_KUDU_STARTUP_FLAGS"] = kudu_args
     call = subprocess.Popen(
@@ -679,7 +683,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
     return cls.cluster.impalads[0].service if cls.cluster.impalads else None
 
   def query_id_from_ui(self, section, match_func=None, match_query=None, coord_idx=0,
-      not_found_ok=False):
+      max_attempts=30, sleep_time_s=1):
     """
       Calls to the debug UI's queries page and loops over all queries in the specified
       section calling the provided func for each query, Returns the string id of the
@@ -696,8 +700,8 @@ class CustomClusterTestSuite(ImpalaTestSuite):
                      is used instead of match_func.
         coord_idx:   Index of the Impalad to use as the coordinator. This is used to
                      determine which impalad's UI to query.
-        not_found_ok: If True, returns None when no matching query is found. If False,
-                      fails an assert when no matching query is found.
+        max_attempts: Number of times to poll the queries page before giving up.
+        sleep_time_s: Number of seconds to sleep between polls of the queries page.
 
       Returns:
         String of the query id of the first matching query or None if no query matches.
@@ -712,20 +716,23 @@ class CustomClusterTestSuite(ImpalaTestSuite):
     if match_query is not None:
       match_query = match_query.lower().strip()
 
-    service = self.cluster.impalads[coord_idx].service
-    queries_json = service.get_debug_webpage_json('/queries')
+    attempts = 0
 
-    for query in queries_json[section]:
-      if (match_query is not None and query["stmt"].lower() == match_query.lower()) \
-          or (match_func is not None and match_func(query)):
-        query_id = query['query_id']
-        return query_id, service.read_query_profile_page(query_id)
+    while attempts < max_attempts:
+      service = self.cluster.impalads[coord_idx].service
+      queries_json = service.get_debug_webpage_json('/queries')
 
-    if not_found_ok:
-      return None, None
-    else:
-      assert False, "No matching query found in section '{}'".format(section)
+      for query in queries_json[section]:
+        if (match_query is not None and query["stmt"].lower() == match_query.lower()) \
+            or (match_func is not None and match_func(query)):
+          query_id = query['query_id']
+          return query_id, service.read_query_profile_page(query_id)
 
+      attempts += 1
+      sleep(sleep_time_s)
+
+    assert False, "No matching query found in section '{}' after {} " \
+        "attempts".format(section, max_attempts)
 
   def query_profile_from_ui(self, query_id, coord_idx=0):
     """

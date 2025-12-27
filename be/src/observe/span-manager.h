@@ -67,7 +67,8 @@ public:
   void AddChildSpanEvent(const opentelemetry::nostd::string_view& name);
 
   // Functions to start child spans. If another child span is active, it will be ended,
-  // a warning will be logged, and a DCHECK failed.
+  // a warning will be logged, and, if the otel_trace_exhaustive_dchecks flag is true,
+  // a DCHECK will fail.
   void StartChildSpanInit();
   void StartChildSpanSubmitted();
   void StartChildSpanPlanning();
@@ -92,14 +93,10 @@ public:
   // client_request_state_->lock().
   void EndChildSpanInit();
   void EndChildSpanSubmitted();
+  void EndChildSpanPlanning();
   void EndChildSpanAdmissionControl(const Status& cause);
   void EndChildSpanQueryExecution();
   void EndChildSpanClose();
-
-  // Function to end the Planning child span. This function takes ownership of
-  // child_span_mu_ BUT NOT client_request_state_->lock(). The code calling this function
-  // already holds client_request_state_->lock().
-  void EndChildSpanPlanning();
 
 private:
   // Tracer instance used to construct spans.
@@ -120,6 +117,11 @@ private:
   std::shared_ptr<TimedSpan> root_;
 
   // TimedSpan instance for the current child span and the mutex to protect it.
+  // To ensure no deadlocks, locks must be acquired in the following order. Note that
+  // ClientRequestState::lock_ only needs to be held when interacting with the
+  // client_request_state_ variable. It should not be held otherwise.
+  // 1. SpanManager::child_span_mu_
+  // 2. ClientRequestState::lock_
   std::unique_ptr<TimedSpan> current_child_;
   std::mutex child_span_mu_;
 

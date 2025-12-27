@@ -528,8 +528,10 @@ set (IMPALA_LIBS
   ExecSequence
   ExecText
   ExecIcebergMetadata
+  ExecPaimon
   Exprs
   ExprsIr
+  ExprsGeoIr
   GlobalFlags
   histogram_proto
   ImpalaThrift
@@ -681,7 +683,8 @@ set (IMPALA_DEPENDENCIES
   java_jvm
   kudu_client
   cctz
-  curl)
+  curl
+  arrow)
 
 # When building with Clang, linking fails because it is trying to
 # use a symbol in kudu_client, but that symbol is discarded. To

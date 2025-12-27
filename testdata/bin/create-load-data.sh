@@ -290,7 +290,7 @@ function load-data {
   LOG_FILE=${IMPALA_DATA_LOADING_LOGS_DIR}/${LOG_BASENAME}
   echo "$LOAD_MSG. Logging to ${LOG_FILE}"
   # Use unbuffered logging by executing with -u
-  if ! impala-python -u ${IMPALA_HOME}/bin/load-data.py ${ARGS[@]} &> ${LOG_FILE}; then
+  if ! impala-python3 -u ${IMPALA_HOME}/bin/load-data.py ${ARGS[@]} &> ${LOG_FILE}; then
     echo Error loading data. The end of the log file is:
     tail -n 50 $LOG_FILE
     return 1
@@ -321,7 +321,7 @@ function load-aux-workloads {
   # Load all the auxiliary workloads (if any exist)
   if [ -d ${IMPALA_AUX_WORKLOAD_DIR} ] && [ -d ${IMPALA_AUX_DATASET_DIR} ]; then
     echo Loading auxiliary workloads. Logging to $LOG_FILE.
-    if ! impala-python -u ${IMPALA_HOME}/bin/load-data.py --workloads all\
+    if ! impala-python3 -u ${IMPALA_HOME}/bin/load-data.py --workloads all\
         --impalad=${IMPALAD}\
         --hive_hs2_hostport=${HS2_HOST_PORT}\
         --hdfs_namenode=${HDFS_NN}\
@@ -386,7 +386,7 @@ function copy-and-load-dependent-tables {
   # For tables that rely on loading data from local fs test-wareload-house
   # TODO: Find a good way to integrate this with the normal data loading scripts
   SQL_FILE=${IMPALA_HOME}/testdata/bin/load-dependent-tables.sql
-  if $USE_APACHE_HIVE; then
+  if $USE_APACHE_HIVE_3; then
     # Apache Hive 3.1 doesn't support "STORED AS JSONFILE" (HIVE-19899)
     NEW_SQL_FILE=${IMPALA_HOME}/testdata/bin/load-dependent-tables-hive3.sql
     sed "s/STORED AS JSONFILE/ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.JsonSerDe'"\
@@ -499,9 +499,14 @@ function copy-and-load-ext-data-source {
   ${IMPALA_HOME}/testdata/bin/copy-ext-data-sources.sh
   # Load the underlying data of the data source
   ${IMPALA_HOME}/testdata/bin/load-ext-data-sources.sh
+  # Fill in the create-ext-data-source-table.sql.template to replace
+  # $WAREHOUSE_LOCATION_PREFIX
+  cat ${IMPALA_HOME}/testdata/bin/create-ext-data-source-table.sql.template \
+      | sed "s#\$WAREHOUSE_LOCATION_PREFIX#${WAREHOUSE_LOCATION_PREFIX}#" \
+      > ${IMPALA_DATA_LOADING_LOGS_DIR}/create-ext-data-source-table.sql
   # Create data sources table.
   ${IMPALA_HOME}/bin/impala-shell.sh -i ${IMPALAD} -f\
-      ${IMPALA_HOME}/testdata/bin/create-ext-data-source-table.sql
+      ${IMPALA_DATA_LOADING_LOGS_DIR}/create-ext-data-source-table.sql
   # Create external JDBC tables for TPCH/TPCDS queries.
   ${IMPALA_HOME}/testdata/bin/create-tpc-jdbc-tables.py --jdbc_db_name=tpch_jdbc \
       --workload=tpch --database_type=impala --clean

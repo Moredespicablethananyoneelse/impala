@@ -253,6 +253,8 @@ struct TShowStatsParams {
   1: TShowStatsOp op
   2: CatalogObjects.TTableName table_name
   3: optional bool show_column_minmax_stats
+  // Optional: filtered partition ids for SHOW PARTITIONS with a WHERE clause.
+  4: optional list<i64> filtered_partition_ids
 }
 
 // Parameters for DESCRIBE HISTORY command
@@ -299,6 +301,10 @@ struct TShowFilesParams {
   // An optional partition set. Set if this operation should apply to a list of
   // partitions rather than the base table.
   2: optional list<list<CatalogObjects.TPartitionKeyValue>> partition_set
+
+  // File paths for Iceberg tables (and potentially other formats),
+  // pre-collected during analysis phase
+  3: optional list<string> selected_files
 }
 
 // Parameters for SHOW [CURRENT] ROLES and SHOW ROLE GRANT GROUP <groupName> commands
@@ -530,6 +536,12 @@ struct TCatalogOpRequest {
 
   // Parameters for DESCRIBE HISTORY
   19: optional TDescribeHistoryParams describe_history_params
+
+  // Options for SHOW CREATE TABLE
+  20: optional bool show_create_table_with_stats
+
+  // Partition limit for SHOW CREATE TABLE WITH STATS
+  21: optional i32 show_create_table_partition_limit
 }
 
 // Query options type
@@ -738,6 +750,10 @@ struct TExecRequest {
 
   // Request for "KILL QUERY" statements.
   26: optional TKillQueryReq kill_query_request
+
+  // Result of statements which end up being NO_OP. Set iff stmt_type is NO_OP. E.g.,
+  // "ALTER TABLE ... CONVERT TO ICEBERG" when the table is already an Iceberg table.
+  27: optional list<string> noop_result
 }
 
 // Parameters to FeSupport.cacheJar().

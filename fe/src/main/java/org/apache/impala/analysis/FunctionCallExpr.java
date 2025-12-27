@@ -622,7 +622,9 @@ public class FunctionCallExpr extends Expr {
   // the needed memory for that precision value which is 2^precision.
   // This method must be identical to function ComputeHllLengthFromScale()
   // defined in aggregate-functions-ir.cc.
-  private int ComputeHllLengthFromScale(int scale) { return 1 << (scale + 8); }
+  public static int ComputeHllLengthFromScale(int scale) {
+    return 1 << (scale + 8);
+  }
 
   @Override
   protected void analyzeImpl(Analyzer analyzer) throws AnalysisException {
@@ -838,8 +840,11 @@ public class FunctionCallExpr extends Expr {
 
   @Override
   protected float computeEvalCost() {
+    Preconditions.checkState(fn_ != null);
+    boolean isJava = fn_.getBinaryType() == TFunctionBinaryType.JAVA;
+    float callCost = isJava ? JAVA_FUNCTION_CALL_COST : FUNCTION_CALL_COST;
     // TODO(tmarshall): Differentiate based on the specific function.
-    return hasChildCosts() ? getChildCosts() + FUNCTION_CALL_COST : UNKNOWN_COST;
+    return hasChildCosts() ? getChildCosts() + callCost : UNKNOWN_COST;
   }
 
   public FunctionCallExpr getMergeAggInputFn() { return mergeAggInputFn_; }

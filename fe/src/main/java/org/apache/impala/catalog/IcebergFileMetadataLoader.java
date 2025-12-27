@@ -32,9 +32,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -49,8 +51,8 @@ import org.apache.impala.catalog.FeIcebergTable.Utils;
 import org.apache.impala.catalog.iceberg.GroupedContentFiles;
 import org.apache.impala.common.FileSystemUtil;
 import org.apache.impala.common.PrintUtils;
-import org.apache.impala.common.Reference;
 import org.apache.impala.common.Pair;
+import org.apache.impala.thrift.TIcebergPartition;
 import org.apache.impala.thrift.TNetworkAddress;
 import org.apache.impala.util.IcebergUtil;
 import org.apache.impala.util.ListMap;
@@ -69,16 +71,22 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
   private final org.apache.iceberg.Table iceTbl_;
   private final Path tablePath_;
   private final GroupedContentFiles icebergFiles_;
+  private final List<TIcebergPartition> oldIcebergPartitions_;
+  private AtomicInteger nextPartitionId_ = new AtomicInteger(0);
+  // Map of the freshly loaded Iceberg partitions and their corresponding ids.
+  private ConcurrentHashMap<TIcebergPartition, Integer> loadedIcebergPartitions_;
   private final boolean requiresDataFilesInTableLocation_;
 
   public IcebergFileMetadataLoader(org.apache.iceberg.Table iceTbl,
-      Iterable<IcebergFileDescriptor> oldFds, ListMap<TNetworkAddress> hostIndex,
-      GroupedContentFiles icebergFiles, boolean requiresDataFilesInTableLocation) {
+        Iterable<IcebergFileDescriptor> oldFds, ListMap<TNetworkAddress> hostIndex,
+        GroupedContentFiles icebergFiles, List<TIcebergPartition> partitions,
+        boolean requiresDataFilesInTableLocation) {
     super(iceTbl.location(), true, oldFds, hostIndex, null, null,
         HdfsFileFormat.ICEBERG);
     iceTbl_ = iceTbl;
     tablePath_ = FileSystemUtil.createFullyQualifiedPath(new Path(iceTbl.location()));
     icebergFiles_ = icebergFiles;
+    oldIcebergPartitions_ = partitions;
     requiresDataFilesInTableLocation_ = requiresDataFilesInTableLocation;
   }
 
@@ -101,8 +109,18 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
         .collect(Collectors.toList());
   }
 
+  public Map<TIcebergPartition, Integer> getIcebergPartitions() {
+    Preconditions.checkNotNull(loadedIcebergPartitions_);
+    return Collections.unmodifiableMap(loadedIcebergPartitions_);
+  }
+
+  public List<TIcebergPartition> getIcebergPartitionList() {
+    return IcebergContentFileStore.convertPartitionMapToList(getIcebergPartitions());
+  }
+
   private void loadInternal() throws CatalogException, IOException {
     loadedFds_ = new ArrayList<>();
+    loadedIcebergPartitions_ = new ConcurrentHashMap<>();
     loadStats_ = new LoadStats(partDir_);
     fileMetadataStats_ = new FileMetadataStats();
 
@@ -114,6 +132,7 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
     List<ContentFile<?>> filesSupportsStorageIds = Lists.newArrayList();
     FileSystem fsForTable = FileSystemUtil.getFileSystemForPath(tablePath_);
     FileSystem defaultFs = FileSystemUtil.getDefaultFileSystem();
+    AtomicLong numUnknownDiskIds = new AtomicLong();
     for (ContentFile<?> contentFile : newContentFiles) {
       FileSystem fsForPath = fsForTable;
       // If requiresDataFilesInTableLocation_ is true, we assume that the file system
@@ -128,11 +147,11 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
       if (FileSystemUtil.supportsStorageIds(fsForPath)) {
         filesSupportsStorageIds.add(contentFile);
       } else {
-        IcebergFileDescriptor fd = createNonLocatedFd(fsForPath, contentFile, tablePath_);
+        IcebergFileDescriptor fd =
+            createNonLocatedFd(fsForPath, contentFile, tablePath_, numUnknownDiskIds);
         registerNewlyLoadedFd(fd);
       }
     }
-    AtomicLong numUnknownDiskIds = new AtomicLong();
     List<IcebergFileDescriptor> newFds = parallelListing(filesSupportsStorageIds,
         numUnknownDiskIds);
     for (IcebergFileDescriptor fd : newFds) {
@@ -161,10 +180,20 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
     }
     List<ContentFile<?>> newContentFiles = Lists.newArrayList();
     for (ContentFile<?> contentFile : icebergFiles_.getAllContentFiles()) {
-      FileDescriptor fd = getOldFd(contentFile, partPath);
+      IcebergFileDescriptor fd = getOldFd(contentFile, partPath);
       if (fd == null) {
         newContentFiles.add(contentFile);
       } else {
+        int oldPartId = fd.getFbFileMetadata().icebergMetadata().partId();
+        TIcebergPartition partition = oldIcebergPartitions_.get(oldPartId);
+        Integer newPartId = loadedIcebergPartitions_.computeIfAbsent(
+            partition, k -> nextPartitionId_.getAndIncrement());
+        // Look up the partition info in this old file descriptor from the partition list.
+        // Put the partition info in the new partitions map and write the new partition id
+        // to the file metadata of the fd.
+        if (!fd.getFbFileMetadata().icebergMetadata().mutatePartId(newPartId)) {
+          throw new TableLoadingException("Error modifying the Iceberg file descriptor.");
+        }
         ++loadStats_.skippedFiles;
         loadedFds_.add(fd);
         fileMetadataStats_.accumulate(fd);
@@ -174,7 +203,8 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
   }
 
   private IcebergFileDescriptor createNonLocatedFd(FileSystem fs,
-      ContentFile<?> contentFile, Path partPath) throws CatalogException, IOException {
+      ContentFile<?> contentFile, Path partPath, AtomicLong numUnknownDiskIds)
+      throws CatalogException, IOException {
     Path fileLoc = FileSystemUtil.createFullyQualifiedPath(
         new Path(contentFile.path().toString()));
     // For OSS service (e.g. S3A, COS, OSS, etc), we create FileStatus ourselves.
@@ -183,24 +213,33 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
     Pair<String, String> absPathRelPath = getAbsPathRelPath(partPath, stat);
     String absPath = absPathRelPath.first;
     String relPath = absPathRelPath.second;
+    int partitionId = addPartitionInfo(contentFile);
 
     return IcebergFileDescriptor.cloneWithFileMetadata(
-        createFd(fs, stat, relPath, null, absPath),
-        IcebergUtil.createIcebergMetadata(iceTbl_, contentFile));
+        createFd(fs, stat, relPath, numUnknownDiskIds, absPath),
+        IcebergUtil.createIcebergMetadata(iceTbl_, contentFile, partitionId));
   }
 
-  private IcebergFileDescriptor createLocatedFd(ContentFile<?> contentFile,
-      FileStatus stat, Path partPath, Reference<Long> numUnknownDiskIds)
+  private IcebergFileDescriptor createLocatedFd(FileSystem fs, ContentFile<?> contentFile,
+      FileStatus stat, Path partPath, AtomicLong numUnknownDiskIds)
       throws CatalogException, IOException {
     Preconditions.checkState(stat instanceof LocatedFileStatus);
 
     Pair<String, String> absPathRelPath = getAbsPathRelPath(partPath, stat);
     String absPath = absPathRelPath.first;
     String relPath = absPathRelPath.second;
+    int partitionId = addPartitionInfo(contentFile);
 
     return IcebergFileDescriptor.cloneWithFileMetadata(
-        createFd(null, stat, relPath, numUnknownDiskIds, absPath),
-        IcebergUtil.createIcebergMetadata(iceTbl_, contentFile));
+        createFd(fs, stat, relPath, numUnknownDiskIds, absPath),
+        IcebergUtil.createIcebergMetadata(iceTbl_, contentFile, partitionId));
+  }
+
+  private int addPartitionInfo(ContentFile<?> contentFile) {
+    TIcebergPartition partition =
+        IcebergUtil.createIcebergPartitionInfo(iceTbl_, contentFile);
+    return loadedIcebergPartitions_.computeIfAbsent(
+        partition, k -> nextPartitionId_.getAndIncrement());
   }
 
   Pair<String, String> getAbsPathRelPath(Path partPath, FileStatus stat)
@@ -294,7 +333,6 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
       pathToFileStatus.put(status.getPath(), status);
     }
     List<IcebergFileDescriptor> ret = new ArrayList<>();
-    Reference<Long> localNumUnknownDiskIds = new Reference<>(0L);
     for (ContentFile<?> contentFile : contentFiles) {
       Path path = FileSystemUtil.createFullyQualifiedPath(
           new Path(contentFile.path().toString()));
@@ -305,9 +343,8 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
             contentFile.path().toString()));
         continue;
       }
-      ret.add(createLocatedFd(contentFile, stat, tablePath_, localNumUnknownDiskIds));
+      ret.add(createLocatedFd(fs, contentFile, stat, tablePath_, numUnknownDiskIds));
     }
-    numUnknownDiskIds.addAndGet(localNumUnknownDiskIds.getRef());
     return ret;
   }
 

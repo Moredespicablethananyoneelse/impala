@@ -20,25 +20,32 @@ from __future__ import absolute_import, division, print_function
 from builtins import range
 import pytest
 
+from tests.common.environ import HIVE_MAJOR_VERSION, IS_APACHE_HIVE
 from impala_thrift_gen.hive_metastore.ttypes import (
     Database,
     FieldSchema,
-    FindNextCompactRequest,
-    GetPartitionsByNamesRequest,
     GetTableRequest,
     SerDeInfo,
     StorageDescriptor,
     Table,
+)
+# The following requests are missing in Apache Hive 3
+if not (IS_APACHE_HIVE and HIVE_MAJOR_VERSION <= 3):
+  from impala_thrift_gen.hive_metastore.ttypes import (
+    FindNextCompactRequest,
+    GetPartitionsByNamesRequest,
     TruncateTableRequest,
     UpdateTransactionalStatsRequest,
     WriteNotificationLogBatchRequest,
 )
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
 from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.skip import SkipIfApacheHive
 from tests.util.event_processor_utils import EventProcessorUtils
 from tests.util.filesystem_utils import IS_HDFS, IS_OZONE
 
 
+@SkipIfApacheHive.feature_not_supported
 class TestMetastoreService(CustomClusterTestSuite):
     """
     Tests for the Catalog Metastore service. Each test in this class should
@@ -449,9 +456,14 @@ class TestMetastoreService(CustomClusterTestSuite):
                       "--hms_port=5899 "
                       "--fallback_to_hms_on_errors=true "
                       "--invalidate_hms_cache_on_ddls=false "
+                      "--hms_event_polling_interval_s=0 "
                       "--enable_sync_to_latest_event_on_ddls=false"
     )
     def test_cache_valid_on_nontransactional_table_ddls(self):
+        """
+        Test makes sure that the cache is not invalidated by table DDLs. Disable event
+        processing to ensure that the cache is not updated by the event processor.
+        """
         db_name = ImpalaTestSuite.get_random_name(
             "test_cache_valid_on_nontransactional_table_ddls_db")
         tbl_name = ImpalaTestSuite.get_random_name(

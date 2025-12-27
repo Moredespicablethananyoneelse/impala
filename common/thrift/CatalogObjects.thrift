@@ -334,6 +334,11 @@ struct TColumn {
   // Key and value field id for Iceberg column with Map type.
   22: optional i32 iceberg_field_map_key_id
   23: optional i32 iceberg_field_map_value_id
+  // The followings are Paimon-specific column properties,
+  // will reuse the iceberg_field_id, is_key, is_nullable
+  // for Paimon table.
+  26: optional bool is_paimon_column
+
 }
 
 // Represents an HDFS file in a partition.
@@ -641,6 +646,11 @@ struct TIcebergPartitionSpec {
   2: optional list<TIcebergPartitionField> partition_fields
 }
 
+struct TIcebergPartition {
+  1: required i32 spec_id
+  2: required list<string> partition_values
+}
+
 struct TIcebergPartitionStats {
   1: required i64 num_files;
   2: required i64 num_rows;
@@ -657,6 +667,7 @@ struct TIcebergContentFileStore {
   6: optional bool has_orc
   7: optional bool has_parquet
   8: optional list<string> missing_files
+  9: optional list<TIcebergPartition> partitions
 }
 
 // Represents a drop partition request for Iceberg tables
@@ -702,6 +713,7 @@ struct TSystemTable {
   1: required TSystemTableName table_name
 }
 
+// Represents a Paimon Catalog Type
 enum TPaimonCatalog {
   HADOOP_CATALOG = 0
   HIVE_CATALOG = 1

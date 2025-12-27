@@ -920,8 +920,9 @@ public class CatalogServiceCatalog extends Catalog {
           .toString(), request.valid_write_ids);
     }
     long tableId = request.getTable_id();
+    // This is only used in the legacy catalog mode. No query ids are sent here.
     Table table = getOrLoadTable(tableName.db_name, tableName.table_name,
-        "needed to fetch partition stats", writeIdList, tableId,
+        "needed to fetch partition stats", /*queryId*/null, writeIdList, tableId,
         NoOpEventSequence.INSTANCE);
 
     // Table could be null if it does not exist anymore.
@@ -2488,8 +2489,6 @@ public class CatalogServiceCatalog extends Catalog {
     // pause the event processing since the cache is anyways being cleared
     metastoreEventProcessor_.pause();
     metastoreEventProcessor_.clear();
-    // Clear delete event log
-    metastoreEventProcessor_.getDeleteEventLog().garbageCollect(currentEventId);
     // Update the HDFS cache pools
     try {
       // We want only 'true' HDFS filesystems to poll the HDFS cache (i.e not S3,
@@ -2803,7 +2802,7 @@ public class CatalogServiceCatalog extends Catalog {
 
   public @Nullable Table getOrLoadTable(String dbName, String tblName, String reason,
       ValidWriteIdList validWriteIdList) throws CatalogException {
-    return getOrLoadTable(dbName, tblName, reason, validWriteIdList,
+    return getOrLoadTable(dbName, tblName, reason, null, validWriteIdList,
         TABLE_ID_UNAVAILABLE, NoOpEventSequence.INSTANCE);
   }
 
@@ -2817,8 +2816,8 @@ public class CatalogServiceCatalog extends Catalog {
    * (not yet loaded table) will be returned.
    */
   public @Nullable Table getOrLoadTable(String dbName, String tblName, String reason,
-      ValidWriteIdList validWriteIdList, long tableId, EventSequence catalogTimeline)
-      throws CatalogException {
+      @Nullable TUniqueId queryId, ValidWriteIdList validWriteIdList, long tableId,
+      EventSequence catalogTimeline) throws CatalogException {
     TTableName tableName = new TTableName(dbName.toLowerCase(), tblName.toLowerCase());
     Table tbl;
     TableLoadingMgr.LoadRequest loadReq = null;
@@ -2891,7 +2890,7 @@ public class CatalogServiceCatalog extends Catalog {
         previousCatalogVersion = tbl.getCatalogVersion();
         LOG.trace("Loading full table {}", tbl.getFullName());
         loadReq = tableLoadingMgr_.loadAsync(tableName, tbl.getCreateEventId(), reason,
-            catalogTimeline);
+            queryId, catalogTimeline);
       }
     } finally {
       versionLock_.readLock().unlock();
@@ -4173,7 +4172,7 @@ public class CatalogServiceCatalog extends Catalog {
     MetastoreEventsProcessor ep = (MetastoreEventsProcessor) metastoreEventProcessor_;
     StringBuilder info = new StringBuilder();
     if (cmdType == MetastoreEventsProcessor.EventProcessorCmdType.PAUSE) {
-      ep.pause();
+      ep.pauseGracefully();
     } else if (cmdType == MetastoreEventsProcessor.EventProcessorCmdType.START) {
       if (!startEventProcessorHelper(params, ep, resp, info)) {
         // 'resp' is updated in startEventProcessorHelper() for errors.
@@ -4182,7 +4181,7 @@ public class CatalogServiceCatalog extends Catalog {
     }
     info.append(String.format("EventProcessor status: %s. LastSyncedEventId: %d. " +
         "LatestEventId: %d.",
-        ep.getStatus(), ep.getLastSyncedEventId(), ep.getLatestEventId()));
+        ep.getStatus(), ep.getGreatestSyncedEventId(), ep.getLatestEventId()));
     resp.setStatus(new TStatus(TErrorCode.OK, Collections.emptyList()));
     resp.setInfo(info.toString());
     return resp;
@@ -4193,7 +4192,7 @@ public class CatalogServiceCatalog extends Catalog {
       StringBuilder warnings) {
     if (!params.isSetEvent_id()) {
       if (ep.getStatus() != EventProcessorStatus.ACTIVE) {
-        ep.start(ep.getLastSyncedEventId());
+        ep.start(ep.getGreatestSyncedEventId());
       }
       return true;
     }
@@ -4373,9 +4372,11 @@ public class CatalogServiceCatalog extends Catalog {
               dbName + "." + tblName, req.table_info_selector.valid_write_ids);
           tableId = req.table_info_selector.getTable_id();
         }
+        TUniqueId queryId = req.isSetHeader() && req.header.isSetQuery_id() ?
+            req.header.query_id : null;
         table = getOrLoadTable(
             objectDesc.getTable().getDb_name(), objectDesc.getTable().getTbl_name(),
-            tableLoadReason, writeIdList, tableId, NoOpEventSequence.INSTANCE);
+            tableLoadReason, queryId, writeIdList, tableId, NoOpEventSequence.INSTANCE);
       } catch (DatabaseNotFoundException e) {
         return createGetPartialCatalogObjectError(req, CatalogLookupStatus.DB_NOT_FOUND);
       }
@@ -4830,9 +4831,9 @@ public class CatalogServiceCatalog extends Catalog {
       return;
     }
     if (isHmsEventSyncDisabled(tbl.getMetaStoreTable())) {
-      LOG.debug("Not adding write ids to table {}.{} for event {} " +
-          "since table/db level flag {} is set to true", dbName, tblName, eventId,
-          MetastoreEventPropertyKey.DISABLE_EVENT_HMS_SYNC.getKey());
+      LOG.debug("Not adding write ids to table {}.{} for event {} since table/db level" +
+          " flag {} or disable_hms_sync_by_default is set to true", dbName,
+          tblName, eventId, MetastoreEventPropertyKey.DISABLE_EVENT_HMS_SYNC.getKey());
       return;
     }
     if (eventId > 0 && eventId <= tbl.getCreateEventId()) {
@@ -4901,7 +4902,10 @@ public class CatalogServiceCatalog extends Catalog {
     }
     String dbFlagVal = getDbProperty(tbl.getDbName(),
         MetastoreEventPropertyKey.DISABLE_EVENT_HMS_SYNC.getKey());
-    return Boolean.parseBoolean(dbFlagVal);
+    if (dbFlagVal != null) {
+      return Boolean.parseBoolean(dbFlagVal);
+    }
+    return BackendConfig.INSTANCE.isDisableHmsSyncByDefault();
   }
 
   /**

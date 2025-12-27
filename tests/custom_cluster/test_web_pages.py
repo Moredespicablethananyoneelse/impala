@@ -27,12 +27,14 @@ import time
 from tests.common.custom_cluster_test_suite import (
   DEFAULT_CLUSTER_SIZE,
   CustomClusterTestSuite)
+from tests.common.environ import ImpalaTestClusterProperties
 from tests.common.impala_connection import IMPALA_CONNECTION_EXCEPTION
 from tests.common.skip import SkipIfFS, SkipIfDockerizedCluster
 from tests.shell.util import run_impala_shell_cmd
 
 SMALL_QUERY_LOG_SIZE_IN_BYTES = 40 * 1024
 CATALOG_URL = "http://localhost:25020/catalog"
+IMPALA_TEST_CLUSTER_PROPERTIES = ImpalaTestClusterProperties.get_instance()
 
 
 class TestWebPage(CustomClusterTestSuite):
@@ -453,19 +455,25 @@ class TestWebPage(CustomClusterTestSuite):
     self.run_stmt_in_hive("set hive.exec.dynamic.partition.mode=nonstrict;" + insert_stmt)
     page = requests.get("http://localhost:25020/events").text
     # Wait until the batched events are being processed
-    while "a batch of" not in page:
-      time.sleep(1)
-      page = requests.get("http://localhost:25020/events").text
+    if not IMPALA_TEST_CLUSTER_PROPERTIES.is_hierarchical_event_processing_enabled():
+      while "a batch of" not in page:
+        time.sleep(1)
+        page = requests.get("http://localhost:25020/events").text
+      expected_lines = [
+        "Current Event Batch", "Metastore Event Batch:",
+        "Event ID starts from", "Event time starts from",
+        "Started processing the current batch at",
+        "Started processing the current event at",
+        "Current Metastore event being processed",
+        "(a batch of ", " events on the same table)",
+      ]
+      for expected in expected_lines:
+        assert expected in page, "Missing '%s' in events page:\n%s" % (expected, page)
     expected_lines = [
-      "Lag Info", "Lag time:", "Current Event Batch", "Metastore Event Batch:",
-      "Event ID starts from", "Event time starts from",
-      "Started processing the current batch at",
-      "Started processing the current event at",
-      "Current Metastore event being processed",
-      "(a batch of ", " events on the same table)",
-    ]
+      "Lag Info", "Lag time:"]
     for expected in expected_lines:
       assert expected in page, "Missing '%s' in events page:\n%s" % (expected, page)
+
 
   @SkipIfFS.hive
   @CustomClusterTestSuite.with_args(
@@ -495,8 +503,11 @@ class TestWebPage(CustomClusterTestSuite):
     json_res = json.loads(requests.get("http://localhost:25020/events?json").text)
     new_latest_event_id = json_res["progress-info"]["latest_event_id"]
     assert new_latest_event_id > old_latest_event_id
-    # Current event (the failed one) should not be cleared
-    assert "current_event" in json_res["progress-info"]
+    # Current event batch info is not shown when hierarchical event processing is
+    # enabled since events are dispatched and then processed in parallel.
+    if not IMPALA_TEST_CLUSTER_PROPERTIES.is_hierarchical_event_processing_enabled():
+      # Current event (the failed one) should not be cleared
+      assert "current_event" in json_res["progress-info"]
 
     # Verify the error message disappears after a global INVALIDATE METADATA
     self.execute_query("invalidate metadata")

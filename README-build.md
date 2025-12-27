@@ -31,15 +31,15 @@ can do so through the environment variables and scripts listed below.
 | CDP_COMPONENTS_HOME | "${IMPALA_HOME}/toolchain/cdp_components-${CDP_BUILD_NUMBER}" | Location of the CDP components within the toolchain. |
 | CDH_MAJOR_VERSION | "7" | Identifier used to uniqueify paths for potentially incompatible component builds. |
 | IMPALA_CONFIG_SOURCED | "1" |  Set by ${IMPALA_HOME}/bin/impala-config.sh (internal use) |
-| IMPALA_JAVA_HOME_OVERRIDE | | Specify a non-system Java version. Overrides IMPALA_JDK_VERSION behavior. |
-| IMPALA_JDK_VERSION | "system" | Set to 8 or 11 to select a system Java version. Default will set JAVA_HOME based on the javac symlink in PATH. |
+| IMPALA_JDK_VERSION | "" | Set to 8+ to select a system Java version. Empty value uses JAVA_HOME, or sets it based on system defaults. |
+| JAVA_HOME | "" | Uses Java from JAVA_HOME unless IMPALA_JDK_VERSION is set. |
 | JAVA | "${JAVA_HOME}/bin/java" | Java binary location. |
 | CLASSPATH | | See bin/set-classpath.sh for details. |
 | PYTHONPATH | | See bin/set-pythonpath.sh for details. |
 | USE_APACHE_COMPONENTS | false | Use Apache components for Hadoop, HBase, Hive, Tez, Ranger. It will set USE_APACHE_{HADOOP,HBASE,HIVE,TEZ,RANGER} variable as true if not set false. |
 | USE_APACHE_HADOOP | false | Use Apache Hadoop |
 | USE_APACHE_HBASE | false | Use Apache HBase |
-| USE_APACHE_HIVE | false | Use Apache Hive |
+| USE_APACHE_HIVE_3 | false | Use Apache Hive-3 |
 | USE_APACHE_TEZ | false | Use Apache Tez |
 | USE_APACHE_RANGER | false | Use Apache Ranger |
 | DOWNLOAD_CDH_COMPONENTS | true | Download CDH components |
@@ -57,11 +57,13 @@ can do so through the environment variables and scripts listed below.
 
 | Environment variable | Default value | Description |
 |----------------------|---------------|-------------|
-| IMPALA_BUILD_THREADS | "8" or set to number of processors by default. | Used for make -j and distcc -j settings. |
+| IMPALA_BUILD_THREADS | Number of processors. | Used for make -j and distcc -j settings. |
+| IMPALA_LINK_THREADS  | Bounded based on available memory. | Used for ninja. |
+| IMPALA_MAKE_CMD      | "make" | Make tool to use by default, options are make or ninja. |
 | IMPALA_MAKE_FLAGS    | "" | Any extra settings to pass to make.  Also used when copying udfs / udas into HDFS. |
 | USE_SYSTEM_GCC       | "0" | If set to any other value, directs cmake to not set GCC_ROOT, CMAKE_C_COMPILER, CMAKE_CXX_COMPILER, as well as setting TOOLCHAIN_LINK_FLAGS |
 | IMPALA_CXX_COMPILER  | "default" | Used by cmake (cmake_modules/toolchain and clang_toolchain.cmake) to select gcc / clang |
-| USE_GOLD_LINKER      | "true" | Directs backend cmake to use gold. |
+| IMPALA_LINKER        | "gold"  | Specifies the linker to use; options are "gold", "mold", or "ld". |
 | IS_OSX               | "false" | (Experimental) currently only used to disable Kudu. |
 
 ## Dependencies

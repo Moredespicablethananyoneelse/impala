@@ -37,7 +37,9 @@ services:
     depends_on:
       - jaeger
     volumes:
-      - ./otel-config.yml:/etc/otel/config.yml
+      - ./otel-config-${PROTOCOL:-http}.yml:/etc/otel/config.yml:ro
+      - ../../../be/src/testutil/localhost.pem:/etc/otel/localhost.pem:ro
+      - ../../../be/src/testutil/localhost.key:/etc/otel/localhost.key:ro
     command: ["--config", "/etc/otel/config.yml"]
     ports:
       - "55888:55888"   # Expose OTLP HTTP externally

@@ -74,6 +74,7 @@ import org.apache.impala.catalog.HdfsFileFormat;
 import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.catalog.TableLoadingException;
 import org.apache.impala.catalog.iceberg.IcebergMetadataTable;
+import org.apache.impala.catalog.paimon.FePaimonTable;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.common.InternalException;
@@ -368,7 +369,7 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
    * For certain qualifying conditions, we can push a limit from the top level
    * sort down to the sort associated with an AnalyticEval node.
    */
-  private static void checkAndApplyLimitPushdown(PlanNode root, SortInfo sortInfo,
+  public static void checkAndApplyLimitPushdown(PlanNode root, SortInfo sortInfo,
     long limit, Analyzer analyzer, PlannerContext planCtx) {
     LimitPushdownInfo pushdownLimit = null;
     AnalyticEvalNode analyticNode = null;
@@ -1610,7 +1611,7 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
     // end up removing some predicates.
     HdfsPartitionPruner pruner = new HdfsPartitionPruner(tupleDesc);
     Pair<List<? extends FeFsPartition>, List<Expr>> pair =
-        pruner.prunePartitions(analyzer, conjuncts, false, hdfsTblRef);
+        pruner.prunePartitions(analyzer, conjuncts, false, false, hdfsTblRef);
     List<? extends FeFsPartition> partitions = pair.first;
 
     // Mark all slots referenced by the remaining conjuncts as materialized.
@@ -1909,6 +1910,10 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
           conjuncts);
       scanNode.init(analyzer);
       return scanNode;
+    } else if (table instanceof FePaimonTable) {
+      PaimonScanPlanner paimonScanPlanner =
+          new PaimonScanPlanner(analyzer, ctx_, tblRef, conjuncts, aggInfo);
+      return paimonScanPlanner.createPaimonScanPlan();
     } else if (table instanceof FeHBaseTable) {
       // HBase table
       scanNode = new HBaseScanNode(ctx_.getNextNodeId(), tblRef.getDesc());
@@ -1927,6 +1932,9 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
       scanNode.addConjuncts(conjuncts);
       scanNode.init(analyzer);
       return scanNode;
+    }  else if (tblRef.getTable() instanceof FePaimonTable) {
+      // This function will be supported in the future
+      throw new NotImplementedException("Query is not supported for PAIMON table now");
     } else {
       throw new NotImplementedException(
           "Planning not implemented for table class: " + table.getClass());
@@ -2376,7 +2384,7 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
     QueryStmt queryStmt = ctx_.getQueryStmt();
     queryStmt.substituteResultExprs(rootNodeSmap, ctx_.getRootAnalyzer());
     List<Expr> resultExprs = queryStmt.getResultExprs();
-    return ctx_.getAnalysisResult().getQueryStmt().createDataSink(resultExprs);
+    return PlanRootSink.create(ctx_, resultExprs, queryStmt.canSpoolResult());
   }
 
   @Override

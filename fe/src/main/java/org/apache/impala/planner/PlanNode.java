@@ -388,7 +388,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
       expBuilder.append(nodeResourceProfile_.getExplainString());
       expBuilder.append("\n");
 
-      if (queryOptions.isCompute_processing_cost() && processingCost_.isValid()
+      if (Planner.isProcessingCostAvailable(queryOptions) && processingCost_.isValid()
           && detailLevel.ordinal() >= TExplainLevel.VERBOSE.ordinal()) {
         // Print processing cost.
         expBuilder.append(processingCost_.getExplainString(detailPrefix, false));
@@ -421,7 +421,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
       } else {
         expBuilder.append(PrintUtils.printEstCardinality(cardinality_));
       }
-      if (queryOptions.isCompute_processing_cost()) {
+      if (Planner.isProcessingCostAvailable(queryOptions)) {
         // Show processing cost total.
         expBuilder.append(" cost=");
         if (processingCost_.isValid()) {
@@ -449,35 +449,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
       }
     }
 
-    if (detailLevel.ordinal() >= TExplainLevel.EXTENDED.ordinal()) {
-      if (getTupleCacheInfo() != null && getTupleCacheInfo().isEligible()) {
-        // This PlanNode is eligible for tuple caching, so there may be TupleCacheNodes
-        // above this point. For debuggability, display this node's contribution to the
-        // tuple cache key by printing its hash trace.
-        //
-        // Print trace in chunks to avoid excessive wrapping and padding in impala-shell.
-        // There are other explain lines at VERBOSE level that are over 100 chars long so
-        // we limit the key chunk length similarly here.
-        expBuilder.append(detailPrefix + "tuple cache key: " +
-            getTupleCacheInfo().getHashString() + "\n");
-        expBuilder.append(detailPrefix + "tuple cache hash trace:\n");
-        final int keyFormatWidth = 100;
-        for (HashTraceElement elem : getTupleCacheInfo().getHashTraces()) {
-          final String hashTrace = elem.getHashTrace();
-          if (hashTrace.length() < keyFormatWidth) {
-            expBuilder.append(String.format("%s  %s: %s\n", detailPrefix,
-                elem.getComment(), hashTrace));
-          } else {
-            expBuilder.append(String.format("%s  %s:\n", detailPrefix,
-                elem.getComment()));
-            for (int idx = 0; idx < hashTrace.length(); idx += keyFormatWidth) {
-              int stopIdx = Math.min(hashTrace.length(), idx + keyFormatWidth);
-              expBuilder.append(String.format("%s  [%s]\n", detailPrefix,
-                  hashTrace.substring(idx, stopIdx)));
-            }
-          }
-        }
-      }
+    // Print information about tuple caching if available
+    if (getTupleCacheInfo() != null) {
+      expBuilder.append(getTupleCacheInfo().getExplainString(detailPrefix, detailLevel));
     }
 
     // Print the children. Do not traverse into the children of an Exchange node to
@@ -1412,6 +1386,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
       // Leaf node, add query options hash.
       tupleCacheInfo_.hashThrift("Query options hash", queryOptsHash);
     }
+    tupleCacheInfo_.calculateCostInformation(this);
     tupleCacheInfo_.finalizeHash();
     LOG.trace("Hash for {}:", this);
     for (HashTraceElement elem : tupleCacheInfo_.getHashTraces()) {

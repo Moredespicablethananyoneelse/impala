@@ -20,9 +20,10 @@ package org.apache.impala.catalog.paimon;
 
 import static org.apache.impala.catalog.Table.isExternalPurgeTable;
 import static org.apache.paimon.CoreOptions.PARTITION_DEFAULT_NAME;
-import static org.apache.paimon.CoreOptions.PARTITION_GENERATE_LEGCY_NAME;
+import static org.apache.paimon.CoreOptions.PARTITION_GENERATE_LEGACY_NAME;
 import static org.apache.paimon.utils.HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 import org.apache.commons.lang3.SerializationUtils;
@@ -70,7 +71,6 @@ import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.hive.HiveCatalog;
-import org.apache.paimon.hive.HiveTypeUtils;
 import org.apache.paimon.hive.LocationKeyExtractor;
 import org.apache.paimon.hive.utils.HiveUtils;
 import org.apache.paimon.options.CatalogOptions;
@@ -104,7 +104,6 @@ import org.apache.paimon.types.SmallIntType;
 import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
 import org.apache.thrift.TException;
-import org.postgresql.shaded.com.ongres.scram.common.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -123,6 +122,9 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+/**
+ * Utils for common paimon related functions.
+ */
 public class PaimonUtil {
   final static Logger LOG = LoggerFactory.getLogger(PaimonUtil.class);
 
@@ -191,10 +193,21 @@ public class PaimonUtil {
     List<FieldSchema> ret = new ArrayList<>();
     for (DataField dataField : schema.getFields()) {
       ret.add(new FieldSchema(dataField.name().toLowerCase(),
-          HiveTypeUtils.toTypeInfo(dataField.type()).getTypeName(),
+          PaimonHiveTypeUtils.toTypeInfo(dataField.type()).getTypeName(),
           dataField.description()));
     }
     return ret;
+  }
+
+  /**
+   * function to close autoClosable object quitely.
+   */
+  public static void closeQuitely(AutoCloseable closeable) {
+    if (closeable != null) {
+      try {
+        closeable.close();
+      } catch (Exception e) { LOG.warn("Error closing " + closeable, e); }
+    }
   }
 
   /**
@@ -205,8 +218,9 @@ public class PaimonUtil {
     List<Column> ret = new ArrayList<>();
     int pos = 0;
     for (DataField dataField : schema.getFields()) {
-      Type colType = ImpalaTypeUtils.toImpalaType(dataField.type());
-      ret.add(new Column(dataField.name().toLowerCase(), colType, pos++));
+      Type colType = PaimonImpalaTypeUtils.toImpalaType(dataField.type());
+      ret.add(new PaimonColumn(dataField.name().toLowerCase(), colType,
+          dataField.description(), pos++, dataField.id(), dataField.type().isNullable()));
     }
     return ret;
   }
@@ -219,7 +233,7 @@ public class PaimonUtil {
     Schema.Builder schemaBuilder = Schema.newBuilder();
     for (TColumn column : columns) {
       schemaBuilder.column(column.getColumnName().toLowerCase(),
-          ImpalaTypeUtils.fromImpalaType(Type.fromThrift(column.getColumnType())));
+          PaimonImpalaTypeUtils.fromImpalaType(Type.fromThrift(column.getColumnType())));
     }
     if (!partitionKeys.isEmpty()) { schemaBuilder.partitionKeys(partitionKeys); }
     if (!options.isEmpty()) { schemaBuilder.options(options); }
@@ -822,7 +836,7 @@ public class PaimonUtil {
     InternalRowPartitionComputer computer =
         new InternalRowPartitionComputer(options.get(PARTITION_DEFAULT_NAME),
             table.rowType(), table.partitionKeys().toArray(new String[0]),
-            options.get(PARTITION_GENERATE_LEGCY_NAME));
+            options.get(PARTITION_GENERATE_LEGACY_NAME));
 
     for (Split split : plan.splits()) {
       if (!(split instanceof DataSplit)) continue;
@@ -857,5 +871,44 @@ public class PaimonUtil {
       }
     }
     return result;
+  }
+
+  /**
+   * convert paimon api table schema to impala columns
+   */
+  public static List<Column> toImpalaColumn(Table table) throws ImpalaRuntimeException {
+    RowType rowType = table.rowType();
+    List<DataField> dataFields = rowType.getFields();
+    List<String> partitionKeys = table.partitionKeys()
+                                     .stream()
+                                     .map(String::toLowerCase)
+                                     .collect(Collectors.toList());
+    List<Column> impalaFields = convertToImpalaSchema(rowType);
+    List<Column> impalaNonPartitionedFields = Lists.newArrayList();
+    List<Column> impalaPartitionedFields = Lists.newArrayList();
+    List<Column> columns = Lists.newArrayList();
+    // lookup the clustering columns
+    for (String name : partitionKeys) {
+      int colIndex = PaimonUtil.getFieldIndexByNameIgnoreCase(rowType, name);
+      Preconditions.checkArgument(colIndex >= 0);
+      impalaPartitionedFields.add(impalaFields.get(colIndex));
+    }
+    // put non-clustering columns in natural order
+    for (int i = 0; i < dataFields.size(); i++) {
+      if (!partitionKeys.contains(dataFields.get(i).name().toLowerCase())) {
+        impalaNonPartitionedFields.add(impalaFields.get(i));
+      }
+    }
+
+    int colPos = 0;
+    for (Column col : impalaPartitionedFields) {
+      col.setPosition(colPos++);
+      columns.add(col);
+    }
+    for (Column col : impalaNonPartitionedFields) {
+      col.setPosition(colPos++);
+      columns.add(col);
+    }
+    return columns;
   }
 }

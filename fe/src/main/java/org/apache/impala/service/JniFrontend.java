@@ -21,7 +21,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
@@ -36,12 +35,12 @@ import org.apache.hadoop.security.ShellBasedUnixGroupsMapping;
 import org.apache.hadoop.security.ShellBasedUnixGroupsNetgroupMapping;
 import org.apache.impala.analysis.DescriptorTable;
 import org.apache.impala.analysis.ToSqlUtils;
+import org.apache.impala.analysis.SqlScanner;
 import org.apache.impala.authentication.saml.WrappedWebContext;
 import org.apache.impala.authorization.AuthorizationFactory;
 import org.apache.impala.authorization.ImpalaInternalAdminUser;
 import org.apache.impala.authorization.User;
 import org.apache.impala.catalog.FeDataSource;
-import org.apache.impala.catalog.FeDb;
 import org.apache.impala.catalog.FeTable;
 import org.apache.impala.catalog.Function;
 import org.apache.impala.common.UserCancelledException;
@@ -56,7 +55,6 @@ import org.apache.impala.thrift.TBackendGflags;
 import org.apache.impala.thrift.TBuildTestDescriptorTableParams;
 import org.apache.impala.thrift.TCatalogObject;
 import org.apache.impala.thrift.TCivilTime;
-import org.apache.impala.thrift.TDatabase;
 import org.apache.impala.thrift.TDescribeDbParams;
 import org.apache.impala.thrift.TDescribeHistoryParams;
 import org.apache.impala.thrift.TDescribeResult;
@@ -89,6 +87,7 @@ import org.apache.impala.thrift.TResultSet;
 import org.apache.impala.thrift.TSessionState;
 import org.apache.impala.thrift.TShowFilesParams;
 import org.apache.impala.thrift.TShowGrantPrincipalParams;
+import org.apache.impala.thrift.TCatalogOpRequest;
 import org.apache.impala.thrift.TShowRolesParams;
 import org.apache.impala.thrift.TShowStatsOp;
 import org.apache.impala.thrift.TShowStatsParams;
@@ -118,12 +117,12 @@ import java.io.IOException;
 import java.lang.IllegalArgumentException;
 import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
-import java.util.Collections;
 import java.util.GregorianCalendar;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.TimeZone;
 
 /**
@@ -352,6 +351,34 @@ public class JniFrontend {
   }
 
   /**
+   * Returns a comma-separated list of Impala SQL keywords that are not part of the
+   * provided ODBC-reserved keywords CSV.
+   */
+  public String getNonOdbcKeywords(byte[] odbcKeywordsCsvT) throws ImpalaException {
+    final TStringLiteral odbcCsv = new TStringLiteral();
+    JniUtil.deserializeThrift(protocolFactory_, odbcCsv, odbcKeywordsCsvT);
+    String csv = odbcCsv.isSetValue()
+        ? StandardCharsets.UTF_8.decode(odbcCsv.value).toString()
+        : "";
+    Set<String> excludes = new HashSet<>();
+    if (csv != null && !csv.isEmpty()) {
+      for (String s : csv.split(",")) {
+        if (s != null) excludes.add(s.trim().toUpperCase());
+      }
+    }
+    StringBuilder sb = new StringBuilder();
+    for (String kw : SqlScanner.getKeywords()) {
+      String upper = kw.toUpperCase();
+      // Exclude symbolic tokens like &&, ||
+      if (upper.isEmpty() || !Character.isLetter(upper.charAt(0))) continue;
+      if (excludes.contains(upper)) continue;
+      if (sb.length() > 0) sb.append(",");
+      sb.append(upper);
+    }
+    return sb.toString();
+  }
+
+  /**
    * Returns files info of a table or partition.
    * The argument is a serialized TShowFilesParams object.
    * The return type is a serialised TResultSet object.
@@ -459,7 +486,9 @@ public class JniFrontend {
           params.isSetShow_column_minmax_stats() && params.show_column_minmax_stats);
     } else {
       result = frontend_.getTableStats(params.getTable_name().getDb_name(),
-          params.getTable_name().getTable_name(), params.op);
+          params.getTable_name().getTable_name(), params.op,
+              params.isSetFiltered_partition_ids() ?
+              params.getFiltered_partition_ids() : null);
     }
     try {
       TSerializer serializer = new TSerializer(protocolFactory_);
@@ -564,13 +593,21 @@ public class JniFrontend {
   /**
    * Returns a SQL DDL string for creating the specified table.
    */
-  public String showCreateTable(byte[] thriftTableName)
+  public String showCreateTable(byte[] thriftParams)
       throws ImpalaException {
     Preconditions.checkNotNull(frontend_);
-    TTableName params = new TTableName();
-    JniUtil.deserializeThrift(protocolFactory_, params, thriftTableName);
-    return ToSqlUtils.getCreateTableSql(frontend_.getCatalog().getTable(
-        params.getDb_name(), params.getTable_name()));
+    TCatalogOpRequest req = new TCatalogOpRequest();
+    JniUtil.deserializeThrift(protocolFactory_, req, thriftParams);
+    Preconditions.checkState(req.isSetShow_create_table_params());
+    TTableName tname = req.getShow_create_table_params();
+    boolean withStats = req.isSetShow_create_table_with_stats()
+        && req.show_create_table_with_stats;
+    // Get show_create_table_partition_limit from request, default to 1000 if not
+    // set.
+    int partitionLimit = req.isSetShow_create_table_partition_limit() ?
+        req.getShow_create_table_partition_limit() :
+        1000;
+    return frontend_.getShowCreateTable(tname, withStats, partitionLimit);
   }
 
   /**

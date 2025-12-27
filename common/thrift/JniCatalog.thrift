@@ -449,6 +449,10 @@ struct TAlterTableExecuteRemoveOrphanFilesParams {
   1: required i64 older_than_millis
 }
 
+// Parameters for ALTER TABLE EXECUTE REPAIR_METADATA operations.
+struct TAlterTableExecuteRepairMetadataParams {
+}
+
 // Parameters for ALTER TABLE EXECUTE ... operations.
 struct TAlterTableExecuteParams {
   // Parameters for ALTER TABLE EXECUTE EXPIRE_SNAPSHOTS
@@ -459,6 +463,9 @@ struct TAlterTableExecuteParams {
 
   // Parameters for ALTER TABLE EXECUTE REMOVE_ORPHAN_FILES
   3: optional TAlterTableExecuteRemoveOrphanFilesParams remove_orphan_files_params
+
+  // True iff it is an ALTER TABLE EXECUTE REPAIR statement.
+  4: optional TAlterTableExecuteRepairMetadataParams repair_metadata_params
 }
 
 // Parameters for all ALTER TABLE commands.
@@ -991,6 +998,16 @@ struct TEventProcessorMetrics {
 
   // Outstanding event count to process on executors
   22: optional i64 outstanding_event_count
+
+  // Number of metastore events that are pending synchronization up to and including
+  // the latest_event_id
+  23: optional i64 pending_event_count
+
+  // Greatest synced event id
+  24: optional i64 greatest_synced_event_id
+
+  // Greatest synced event time
+  25: optional i64 greatest_synced_event_time
 }
 
 struct TCatalogHmsCacheApiMetrics {

@@ -18,6 +18,7 @@
 #include "scheduling/admission-control-service.h"
 
 #include "common/constant-strings.h"
+#include "common/names.h"
 #include "gen-cpp/admission_control_service.pb.h"
 #include "gutil/strings/substitute.h"
 #include "kudu/rpc/rpc_context.h"
@@ -35,13 +36,16 @@
 #include "util/parse-util.h"
 #include "util/promise.h"
 
-#include "common/names.h"
-
 using kudu::rpc::RpcContext;
 
 static const string QUEUE_LIMIT_MSG = "(Advanced) Limit on RPC payloads consumption for "
                                       "AdmissionControlService. "
     + Substitute(MEM_UNITS_HELP_MSG, "the process memory limit");
+static const string ADMISSION_MAP_SIZE_METRIC_KEY =
+    "admission-control-service.num-queries";
+static const string ADMISSION_MAP_SIZE_HWM_METRIC_KEY =
+    "admission-control-service.num-queries-high-water-mark";
+
 DEFINE_string(admission_control_service_queue_mem_limit, "50MB", QUEUE_LIMIT_MSG.c_str());
 DEFINE_int32(admission_control_service_num_svc_threads, 0,
     "Number of threads for processing admission control service's RPCs. if left at "
@@ -73,7 +77,7 @@ namespace impala {
 
 AdmissionControlService::AdmissionControlService(MetricGroup* metric_group)
   : AdmissionControlServiceIf(AdmissiondEnv::GetInstance()->rpc_mgr()->metric_entity(),
-        AdmissiondEnv::GetInstance()->rpc_mgr()->result_tracker()) {
+      AdmissiondEnv::GetInstance()->rpc_mgr()->result_tracker()) {
   MemTracker* process_mem_tracker = AdmissiondEnv::GetInstance()->process_mem_tracker();
   bool is_percent; // not used
   int64_t bytes_limit =
@@ -89,6 +93,9 @@ AdmissionControlService::AdmissionControlService(MetricGroup* metric_group)
       bytes_limit, "Admission Control Service Queue", process_mem_tracker));
   MemTrackerMetric::CreateMetrics(
       metric_group, mem_tracker_.get(), "AdmissionControlService");
+  AtomicHighWaterMarkGauge* map_size_metric = metric_group->AddHWMGauge(
+      ADMISSION_MAP_SIZE_HWM_METRIC_KEY, ADMISSION_MAP_SIZE_METRIC_KEY, 0);
+  admission_state_map_.SetSizeMetric(map_size_metric);
 }
 
 Status AdmissionControlService::Init() {
@@ -133,12 +140,13 @@ void AdmissionControlService::AdmitQuery(
 
   shared_ptr<AdmissionState> admission_state;
   admission_state = make_shared<AdmissionState>(req->query_id(), req->coord_id());
+  admission_state->query_exec_request = make_unique<TQueryExecRequest>();
 
   admission_state->summary_profile =
       RuntimeProfile::Create(&admission_state->profile_pool, "Summary");
 
   RESPOND_IF_ERROR(GetSidecar(req->query_exec_request_sidecar_idx(), rpc_context,
-      &admission_state->query_exec_request));
+      admission_state->query_exec_request.get()));
 
   for (const NetworkAddressPB& address : req->blacklisted_executor_addresses()) {
     admission_state->blacklisted_executor_addresses.emplace(address);
@@ -190,6 +198,8 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
       if (admission_state->admission_done) {
         if (admission_state->admit_status.ok()) {
           *resp->mutable_query_schedule() = *admission_state->schedule.get();
+          // Free TQueryExecRequest since it's not required after admission is done
+          admission_state->query_exec_request.reset();
         } else {
           status = admission_state->admit_status;
         }
@@ -339,8 +349,8 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
     lock_guard<mutex> l(admission_state->lock);
     bool queued;
     AdmissionController::AdmissionRequest request = {admission_state->query_id,
-        admission_state->coord_id, admission_state->query_exec_request,
-        admission_state->query_exec_request.query_ctx.client_request.query_options,
+        admission_state->coord_id, *admission_state->query_exec_request,
+        admission_state->query_exec_request->query_ctx.client_request.query_options,
         admission_state->summary_profile,
         admission_state->blacklisted_executor_addresses};
     admission_state->admit_status =

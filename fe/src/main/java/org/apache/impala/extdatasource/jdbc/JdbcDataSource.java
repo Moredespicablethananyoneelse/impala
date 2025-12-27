@@ -57,6 +57,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
@@ -130,8 +131,27 @@ public class JdbcDataSource implements ExternalDataSource {
               Lists.newArrayList("Invalid init_string value")));
     }
     List<Integer> acceptedPredicates = acceptedPredicates(params.getPredicates());
+    long numRecords = 0;
+    try {
+      dbAccessor_ = DatabaseAccessorFactory.getAccessor(tableConfig_);
+      numRecords = dbAccessor_.getTotalNumberOfRecords(tableConfig_);
+      LOG.info(String.format("Estimated number of records: %d", numRecords));
+    } catch (JdbcDatabaseAccessException e) {
+      return new TPrepareResult(
+          new TStatus(TErrorCode.RUNTIME_ERROR,
+              Lists.newArrayList("Failed to retrieve total number of records: "
+                  + e.getMessage())));
+    }
+    if (dbAccessor_ != null) {
+      if (params.isSetClean_dbcp_ds_cache()) {
+        cleanDbcpDSCache_ = params.isClean_dbcp_ds_cache();
+      }
+      dbAccessor_.close(null, cleanDbcpDSCache_);
+      dbAccessor_ = null;
+    }
     return new TPrepareResult(STATUS_OK)
-            .setAccepted_conjuncts(acceptedPredicates);
+            .setAccepted_conjuncts(acceptedPredicates)
+            .setNum_rows_estimate(numRecords);
   }
 
   @Override
@@ -301,46 +321,62 @@ public class JdbcDataSource implements ExternalDataSource {
     Map<String, String> columnMapping = getColumnMapping(tableConfig_
         .get(JdbcStorageConfig.COLUMN_MAPPING.getPropertyName()));
     // Build query statement
-    StringBuilder sb = new StringBuilder("SELECT ");
-    String project;
-    // If cols size equals to 0, it is 'select count(*) from tbl' statement.
-    if (schema_.getColsSize() == 0) {
-      project = "*";
-    } else {
-      String driverClass = JdbcStorageConfigManager.getConfigValue(
-          JdbcStorageConfig.JDBC_DRIVER_CLASS, tableConfig_);
-      final String quoteChar;
-      if (driverClass != null && (driverClass.toLowerCase().contains("impala") ||
-          driverClass.toLowerCase().contains("hive") ||
-          driverClass.toLowerCase().contains("mysql"))) {
-        quoteChar = "`";
+    String query;
+
+    String tableName = tableConfig_.get(JdbcStorageConfig.TABLE.getPropertyName());
+    // Check if 'table' property is not null or empty
+    if (!Strings.isNullOrEmpty(tableName)) {
+      StringBuilder sb = new StringBuilder("SELECT ");
+      String project;
+      // If cols size equals to 0, it is 'select count(*) from tbl' statement.
+      if (schema_.getColsSize() == 0) {
+        project = "*";
       } else {
-        quoteChar = "\"";
+        String driverClass = JdbcStorageConfigManager.getConfigValue(
+            JdbcStorageConfig.JDBC_DRIVER_CLASS, tableConfig_);
+        final String quoteChar;
+        if (driverClass != null && (driverClass.toLowerCase().contains("impala") ||
+            driverClass.toLowerCase().contains("hive") ||
+            driverClass.toLowerCase().contains("mysql"))) {
+          quoteChar = "`";
+        } else {
+          quoteChar = "\"";
+        }
+
+        project = schema_.getCols().stream()
+                .map(TColumnDesc::getName)
+                .map(name -> columnMapping.containsKey(name)
+                        ? columnMapping.get(name)
+                        : quoteChar + name + quoteChar)
+                .collect(Collectors.joining(", "));
+      }
+      sb.append(project);
+      sb.append(" FROM ");
+      // Make jdbc table name to be quoted with double quotes if
+      // columnMapping is not empty
+      if (!columnMapping.isEmpty()) {
+        tableName = dbAccessor_.getCaseSensitiveName(tableName);
+      }
+      sb.append(tableName);
+      String condition = QueryConditionUtil
+          .buildCondition(params.getPredicates(), columnMapping, dbAccessor_);
+      if (StringUtils.isNotBlank(condition)) {
+        sb.append(" WHERE ").append(condition);
       }
 
-      project = schema_.getCols().stream()
-              .map(TColumnDesc::getName)
-              .map(name -> columnMapping.containsKey(name)
-                      ? columnMapping.get(name)
-                      : quoteChar + name + quoteChar)
-              .collect(Collectors.joining(", "));
+      query = sb.toString();
+    } else {
+      // Use 'query' property if 'table' is null
+      query = tableConfig_.get(JdbcStorageConfig.QUERY.getPropertyName());
+      Preconditions.checkState(!Strings.isNullOrEmpty(query));
+      if (Strings.isNullOrEmpty(query)) {
+        throw new IllegalStateException("Generated query is null or empty");
+      }
     }
-    sb.append(project);
-    sb.append(" FROM ");
-    // Make jdbc table name to be quoted with double quotes if columnMapping is not empty
-    String jdbcTableName = tableConfig_.get(JdbcStorageConfig.TABLE.getPropertyName());
-    if (!columnMapping.isEmpty()) {
-      jdbcTableName = dbAccessor_.getCaseSensitiveName(jdbcTableName);
-    }
-    sb.append(jdbcTableName);
-    String condition = QueryConditionUtil
-        .buildCondition(params.getPredicates(), columnMapping, dbAccessor_);
-    if (StringUtils.isNotBlank(condition)) {
-      sb.append(" WHERE ").append(condition);
-    }
-    // Execute query and get iterator
-    tableConfig_.set(JdbcStorageConfig.QUERY.getPropertyName(), sb.toString());
-    LOG.trace("JDBC Query: " + sb.toString());
+
+    // Store the generated query
+    tableConfig_.set(JdbcStorageConfig.QUERY.getPropertyName(), query);
+    LOG.trace("JDBC Query: " + query);
 
     if (schema_.getColsSize() != 0) {
       int limit = -1;

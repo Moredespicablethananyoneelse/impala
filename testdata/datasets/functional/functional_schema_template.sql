@@ -3390,6 +3390,20 @@ hadoop fs -put -f ${IMPALA_HOME}/testdata/data/iceberg_test/hadoop_catalog/ice/a
 ---- DATASET
 functional
 ---- BASE_TABLE_NAME
+airports_parquet_alternative
+---- CREATE
+CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+STORED AS ICEBERG
+TBLPROPERTIES('write.format.default'='parquet', 'iceberg.catalog'='hadoop.catalog',
+              'iceberg.catalog_location'='/test-warehouse/iceberg_test/secondary_hadoop_catalog',
+              'iceberg.table_identifier'='berg.airports_parquet');
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/iceberg_test/secondary_hadoop_catalog/berg && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/iceberg_test/hadoop_catalog/ice/airports_parquet /test-warehouse/iceberg_test/secondary_hadoop_catalog/berg
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
 iceberg_resolution_test_external
 ---- CREATE
 CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
@@ -4820,8 +4834,56 @@ paimon_non_partitioned
 ---- CREATE
 CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
 STORED AS PAIMON
-LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/paimon_non_partitioned'
+LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/paimon_non_partitioned';
 ---- DEPENDENT_LOAD
 `hadoop fs -mkdir -p /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db && \
-hadoop fs -put -f ${IMPALA_HOME}//testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/paimon_non_partitioned /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/paimon_non_partitioned /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
 ====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+paimon_primitive_alltypes
+---- CREATE
+CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+STORED AS PAIMON
+LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/paimon_primitive_alltypes';
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/paimon_primitive_alltypes /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+paimon_decimal_tbl
+---- CREATE
+CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+STORED AS PAIMON
+LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/paimon_decimal_tbl';
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/paimon_decimal_tbl /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+alltypes_paimon
+---- CREATE
+CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+STORED AS PAIMON
+LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/alltypes_paimon';
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/alltypes_paimon /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+alltypes_structs_paimon
+---- CREATE
+CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+STORED AS PAIMON
+LOCATION '/test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db/alltypes_structs_paimon';
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/paimon_test/paimon_catalog/warehouse/functional.db/alltypes_structs_paimon /test-warehouse/paimon_test/paimon_catalog/warehouse/functional.db
+

@@ -224,9 +224,14 @@ public class TestUtils {
   static IgnoreValueFilter SCAN_RANGE_ROW_COUNT_FILTER =
       new IgnoreValueFilter("max-scan-range-rows", PrintUtils.METRIC_REGEX);
 
+  // Ignore the tuple cache key, as it can vary across different dataloads
+  static IgnoreValueFilter TUPLE_CACHE_KEY_FILTER =
+      new IgnoreValueFilter("cache key", " \\S+", ':');
+
   // Filters that are always applied
   private static final List<ResultFilter> DEFAULT_FILTERS = Arrays.<ResultFilter>asList(
-    SCAN_RANGE_ROW_COUNT_FILTER, new PathFilter("hdfs:"), new PathFilter("file: "));
+      SCAN_RANGE_ROW_COUNT_FILTER, TUPLE_CACHE_KEY_FILTER, new PathFilter("hdfs:"),
+      new PathFilter("file: "));
 
   // Filters that ignore the values of resource requirements that appear in
   // "EXTENDED" and above explain plans.
@@ -445,6 +450,13 @@ public class TestUtils {
     String hiveMajorVersion = Preconditions.checkNotNull(System.getenv(
         "IMPALA_HIVE_MAJOR_VERSION"));
     return Integer.parseInt(hiveMajorVersion);
+  }
+
+  /**
+   * Returns whether we are using Apache Hive versions.
+   */
+  public static boolean isApacheHiveVersion() {
+    return Boolean.parseBoolean(System.getenv("USE_APACHE_HIVE"));
   }
 
   /**

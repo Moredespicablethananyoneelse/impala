@@ -166,7 +166,8 @@ class Frontend {
 
   /// Returns (in the output parameter) a string containing the CREATE TABLE command that
   /// creates the table specified in the params.
-  Status ShowCreateTable(const TTableName& table_name, std::string* response);
+  Status ShowCreateTable(const TTableName& table_name, bool with_stats,
+      int32_t show_create_table_partition_limit, std::string* response);
 
   /// Returns (in the output parameter) a string containing the CREATE FUNCTION command that
   /// creates the function specified in the params.
@@ -261,6 +262,9 @@ class Frontend {
   Status HiveLegacyTimezoneConvert(
       const string& timezone, long utc_time_millis, TCivilTime* local_time);
 
+  /// Returns a CSV list of Impala keywords excluding the provided ODBC-reserved CSV.
+  Status GetNonOdbcKeywords(const std::string& odbc_keywords_csv, std::string* response);
+
  private:
   jclass fe_class_; // org.apache.impala.service.JniFrontend class
   jobject fe_;  // instance of org.apache.impala.service.JniFrontend
@@ -308,6 +312,7 @@ class Frontend {
   jmethodID get_secret_from_key_store_; // JniFrontend.getSecretFromKeyStore()
   jmethodID hive_legacy_timezone_convert_; // JniFrontend.hiveLegacyTimezoneConvert()
   jmethodID cancel_exec_request_id_; // JniFrontend.cancelExecRequest()
+  jmethodID get_non_odbc_keywords_id_; // JniFrontend.getNonOdbcKeywords(String)
 
   // Only used for testing.
   jmethodID build_test_descriptor_table_id_; // JniFrontend.buildTestDescriptorTable()

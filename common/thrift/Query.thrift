@@ -136,6 +136,16 @@ enum TSlotCountStrategy {
   PLANNER_CPU_ASK = 1
 }
 
+// Set of options for the tuple_cache_placement_policy. See TupleCachePlanner and
+// associated classes for the specific policies for each option.
+enum TTupleCachePlacementPolicy {
+  // Place tuple cache nodes at all eligible locations
+  ALL_ELIGIBLE = 0,
+
+  // Place tuple cache nodes using costing policies
+  COST_BASED = 1
+}
+
 // constants for TQueryOptions.num_nodes
 const i32 NUM_NODES_ALL = 0
 const i32 NUM_NODES_ALL_RACKS = -1
@@ -788,6 +798,19 @@ struct TQueryOptions {
 
   // See comment in ImpalaService.thrift
   195: optional double broadcast_cost_scale_factor = 1.0
+
+  // See comment in ImpalaService.thrift
+  196: optional TTupleCachePlacementPolicy tuple_cache_placement_policy =
+      TTupleCachePlacementPolicy.COST_BASED;
+
+  // See comment in ImpalaService.thrift
+  197: optional double tuple_cache_required_cost_reduction_factor = 3.0;
+
+  // See comment in ImpalaService.thrift (defaults to 100MB)
+  198: optional i64 tuple_cache_budget_bytes_per_executor = 104857600;
+
+  // See comment in ImpalaService.thrift
+  199: optional i32 show_create_table_partition_limit = 1000
 }
 
 // Impala currently has three types of sessions: Beeswax, HiveServer2 and external
@@ -966,6 +989,7 @@ struct TQueryCtx {
   // True if the query is transactional for Kudu table.
   29: required bool is_kudu_transactional = false
 
+  // DEPRECATED by IMPALA-13756.
   // True if the query can be optimized for Iceberg V2 table.
   30: required bool optimize_count_star_for_iceberg_v2 = false
 

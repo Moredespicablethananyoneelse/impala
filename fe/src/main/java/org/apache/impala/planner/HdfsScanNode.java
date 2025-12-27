@@ -261,6 +261,11 @@ public class HdfsScanNode extends ScanNode {
   // This has no impact on mt_dop=0.
   private boolean deterministicScanRangeAssignment_ = false;
 
+  // True if this scan node should schedule scan ranges in order from oldest to
+  // newest. Scheduling in this order reduces the disruption when a new file is
+  // added to an existing table.
+  private boolean scheduleScanRangesOldestToNewest_ = false;
+
   // True if this is a scan that only returns partition keys and is only required to
   // return at least one of each of the distinct values of the partition keys.
   private final boolean isPartitionKeyScan_;
@@ -1873,13 +1878,13 @@ public class HdfsScanNode extends ScanNode {
       msg.hdfs_scan_node.setSkip_header_line_count(skipHeaderLineCount_);
     }
     msg.hdfs_scan_node.setUse_mt_scan_node(useMtScanNode_);
-    // The reason we skip setting the deterministic scan range assignment field for
-    // tuple cache is that has not been set yet at this point. At the point we are
-    // computing the tuple cache key, it is always false and has no information.
-    // Even if it was set, it would not tell us anything about the result set.
+    // These two fields are purely about scheduling policy, so they do not impact the
+    // compile-time key. They are also not set yet when the tuple cache key is computed.
     if (!serialCtx.isTupleCache()) {
       msg.hdfs_scan_node.setDeterministic_scanrange_assignment(
           deterministicScanRangeAssignment_);
+      msg.hdfs_scan_node.setSchedule_scanranges_oldest_to_newest(
+          scheduleScanRangesOldestToNewest_);
     }
     if (countStarSlot_ != null) {
       msg.hdfs_scan_node.setCount_star_slot_offset(countStarSlot_.getByteOffset());
@@ -1945,48 +1950,7 @@ public class HdfsScanNode extends ScanNode {
         // This is in testing mode.
         testTableSize = desc_.getTable().getTTableStats().total_file_bytes;
       }
-      String partMetaTemplate = "partitions=%d/%d files=%d size=%s\n";
-      String erasureCodeTemplate = "erasure coded: files=%d size=%s\n";
-      if (!numPartitionsPerFs_.isEmpty()) {
-        // The table is partitioned; print a line for each filesystem we are reading
-        // partitions from
-        for (Map.Entry<FileSystemUtil.FsType, Long> partsPerFs :
-            numPartitionsPerFs_.entrySet()) {
-          FileSystemUtil.FsType fsType = partsPerFs.getKey();
-          output.append(detailPrefix);
-          output.append(fsType).append(" ");
-          long bytesToDisplay = totalBytesPerFs_.get(fsType);
-          if (testTableSize > -1) {
-            bytesToDisplay = (long) ((double) partsPerFs.getValue()
-                / table.getPartitions().size() * testTableSize);
-          }
-          output.append(String.format(partMetaTemplate, partsPerFs.getValue(),
-              table.getPartitions().size(), totalFilesPerFs_.get(fsType),
-              PrintUtils.printBytes(bytesToDisplay)));
-
-          // Report the total number of erasure coded files and total bytes, if any.
-          if (totalFilesPerFsEC_.containsKey(fsType)) {
-            long totalNumECFiles = totalFilesPerFsEC_.get(fsType);
-            long totalECSize = totalBytesPerFsEC_.get(fsType);
-            output.append(String.format("%s", detailPrefix))
-                .append(String.format(erasureCodeTemplate, totalNumECFiles,
-                    PrintUtils.printBytes(totalECSize)));
-          }
-        }
-      } else if (tbl_.getNumClusteringCols() == 0) {
-        // There are no partitions so we use the FsType of the base table. No report
-        // on EC related info.
-        output.append(detailPrefix);
-        output.append(table.getFsType()).append(" ");
-        output.append(String.format(partMetaTemplate, 1, table.getPartitions().size(),
-            0, PrintUtils.printBytes(0)));
-      } else {
-        // The table is partitioned, but no partitions are selected; in this case we
-        // exclude the FsType completely. No report on EC related info.
-        output.append(detailPrefix);
-        output.append(String.format(partMetaTemplate, 0, table.getPartitions().size(),
-            0, PrintUtils.printBytes(0)));
-      }
+      getPartitionExplainString(output, detailPrefix, table, testTableSize);
 
       // Add information about whether this uses deterministic scan range scheduling
       // To avoid polluting the explain output, only add this if mt_dop>0 and
@@ -1995,6 +1959,13 @@ public class HdfsScanNode extends ScanNode {
         output.append(detailPrefix)
           .append(String.format("deterministic scan range assignment: %b\n",
               deterministicScanRangeAssignment_));
+      }
+      // Include information about scheduling scan ranges oldest to newest only if
+      // it is set. This is currently only used for tuple caching.
+      if (scheduleScanRangesOldestToNewest_) {
+        output.append(detailPrefix)
+          .append(String.format("schedule scan ranges oldest to newest: %b\n",
+              scheduleScanRangesOldestToNewest_));
       }
 
       if (!conjuncts_.isEmpty()) {
@@ -2066,6 +2037,65 @@ public class HdfsScanNode extends ScanNode {
           .append("\n");
     }
     return output.toString();
+  }
+
+  protected void getPartitionExplainString(StringBuilder output,
+      String detailPrefix, FeFsTable table, long testTableSize) {
+    String partMetaTemplate = "partitions=%d/%s files=%d size=%s\n";
+    String erasureCodeTemplate = "erasure coded: files=%d size=%s\n";
+    if (!numPartitionsPerFs_.isEmpty()) {
+      // The table is partitioned; print a line for each filesystem we are reading
+      // partitions from
+      for (Map.Entry<FileSystemUtil.FsType, Long> partsPerFs :
+          numPartitionsPerFs_.entrySet()) {
+        FileSystemUtil.FsType fsType = partsPerFs.getKey();
+        output.append(detailPrefix);
+        output.append(fsType).append(" ");
+        long bytesToDisplay = totalBytesPerFs_.get(fsType);
+        if (testTableSize > -1) {
+          bytesToDisplay = (long) ((double) partsPerFs.getValue()
+              / getNumPartitions(table) * testTableSize);
+        }
+        output.append(String.format(
+            partMetaTemplate, getNumSelectedPartitions(partsPerFs.getValue()),
+            getNumPartitionString(table), totalFilesPerFs_.get(fsType),
+            PrintUtils.printBytes(bytesToDisplay)));
+
+        // Report the total number of erasure coded files and total bytes, if any.
+        if (totalFilesPerFsEC_.containsKey(fsType)) {
+          long totalNumECFiles = totalFilesPerFsEC_.get(fsType);
+          long totalECSize = totalBytesPerFsEC_.get(fsType);
+          output.append(String.format("%s", detailPrefix))
+              .append(String.format(erasureCodeTemplate, totalNumECFiles,
+                  PrintUtils.printBytes(totalECSize)));
+        }
+      }
+    } else if (tbl_.getNumClusteringCols() == 0) {
+      // There are no partitions so we use the FsType of the base table. No report
+      // on EC related info.
+      output.append(detailPrefix);
+      output.append(table.getFsType()).append(" ");
+      output.append(String.format(partMetaTemplate, 1, getNumPartitionString(table),
+          0, PrintUtils.printBytes(0)));
+    } else {
+      // The table is partitioned, but no partitions are selected; in this case we
+      // exclude the FsType completely. No report on EC related info.
+      output.append(detailPrefix);
+      output.append(String.format(partMetaTemplate, 0, getNumPartitionString(table),
+          0, PrintUtils.printBytes(0)));
+    }
+  }
+
+  protected long getNumSelectedPartitions(long partsPerFs) {
+    return partsPerFs;
+  }
+
+  protected int getNumPartitions(FeFsTable table) {
+    return table.getPartitions().size();
+  }
+
+  protected String getNumPartitionString(FeFsTable table) {
+    return Integer.toString(getNumPartitions(table));
   }
 
   // Overriding this function can be used to add extra information to the explain string
@@ -2636,6 +2666,14 @@ public class HdfsScanNode extends ScanNode {
 
   public boolean usesDeterministicScanRangeAssignment() {
     return deterministicScanRangeAssignment_;
+  }
+
+  public void setScheduleScanRangesOldestToNewest(boolean enabled) {
+    scheduleScanRangesOldestToNewest_ = enabled;
+  }
+
+  public boolean scheduleScanRangesOldestToNewest() {
+    return scheduleScanRangesOldestToNewest_;
   }
 
   // Remove any expression in 'exprs' that has matching equality predicate,

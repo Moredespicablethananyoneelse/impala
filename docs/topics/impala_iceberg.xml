@@ -698,8 +698,8 @@ OPTIMIZE TABLE [<varname>db_name</varname>.]<varname>table_name</varname> [FILE_
       </p>
 
       <p>
-        We can use the <codeph>FOR SYSTEM_TIME AS OF</codeph> and <codeph>FOR SYSTEM_VERSION AS OF</codeph>
-        clauses in <codeph>SELECT</codeph> queries, e.g.:
+        We can use the clauses <codeph>FOR SYSTEM_TIME AS OF</codeph> with a timestamp and
+        <codeph>FOR SYSTEM_VERSION AS OF</codeph> with a snapshot id in <codeph>SELECT</codeph> queries, e.g.:
         <codeblock>
 SELECT * FROM ice_t FOR SYSTEM_TIME AS OF '2022-01-04 10:00:00';
 SELECT * FROM ice_t FOR SYSTEM_TIME AS OF now() - interval 5 days;
@@ -808,6 +808,74 @@ ALTER TABLE ice_tbl EXECUTE expire_snapshots(now() - interval 5 days);
         allows automatic metadata file removal after operations that modify metadata
         such as expiring snapshots or inserting data.
       </p>
+    </conbody>
+  </concept>
+
+  <concept id="iceberg_remove_orphan_files">
+    <title>Removing orphan files</title>
+    <conbody>
+      <p>
+        Failures can leave files that are not referenced by table metadata. These are
+        called orphan files. And in some cases normal snapshot expiration may not be able
+        to determine a file is no longer needed and delete it. Impala can remove these
+        orphan files with
+        <codeph>ALTER TABLE ... EXECUTE remove_orphan_files(...)</codeph>
+        statement, which will remove all orphan files that has modification time older
+        than the specified timestamp. For example:
+        <codeblock>
+-- Remove orphan files older than '2022-01-04 10:00:00'.
+ALTER TABLE ice_tbl EXECUTE remove_orphan_files('2022-01-04 10:00:00');
+
+-- Remove orphan files older than 5 days from now.
+ALTER TABLE ice_tbl EXECUTE remove_orphan_files(now() - interval 5 days);
+        </codeblock>
+      </p>
+      <p>
+        Note that this is a destructive query that will wipe out any files within Iceberg
+        table's 'data' and 'metadata' directory that is not addressable by any valid
+        snapshots. It is dangerous to remove orphan files with a retention interval
+        shorter than the time expected for any write to complete because it might corrupt
+        the table if in-progress files are considered orphaned and are deleted. It is
+        recommended to set timestamp a day ago or older for this remove orphan files
+        query.
+      </p>
+    </conbody>
+  </concept>
+
+  <concept id="iceberg_repair_metadata">
+    <title>Repair table metadata</title>
+    <conbody>
+      <p>
+        Users should always use the engine/Iceberg API to interact with Iceberg tables;
+        e.g. to remove a partition, use Impala and issue the DROP PARTITION statement
+        instead of deleting the partition directory.
+        Deleting files directly from storage without going through the Iceberg API
+        corrupts the table, and makes queries that try to read the missing files fail
+        with the following error message:
+        <codeph>Iceberg table [...] cannot be fully loaded due to unavailable
+        files</codeph>.
+     </p>
+     <p>
+        This happens because the metadata files are still referencing the missing data
+        files. This erroneous state can be fixed by restoring the deleted files on the
+        file system.
+        If this is not intended or not possible, the dangling references can be removed
+        from the Iceberg metadata with the
+        <codeph>ALTER TABLE ... EXECUTE repair_metadata()</codeph>
+        statement, so that the table becomes functional again.
+        <codeblock>
+-- Use the statement simply without parameters:
+ALTER TABLE ice_tbl EXECUTE repair_metadata();
+        </codeblock>
+      </p>
+      <note>
+        This operation does not restore the deleted content. Execute only if
+        there is no intention to restore the missing data.
+        <p>
+          Impala can repair the table only if the missing files are data files,
+          but it cannot repair the table if there are missing delete files.
+        </p>
+      </note>
     </conbody>
   </concept>
 

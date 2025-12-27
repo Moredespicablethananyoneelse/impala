@@ -1100,7 +1100,8 @@ class TestAdmissionController(TestAdmissionControllerBase):
   @CustomClusterTestSuite.with_args(
       impalad_args=impalad_admission_ctrl_flags(max_requests=10, max_queued=10,
         pool_max_mem=10 * 1024 * 1024, proc_mem_limit=2 * 1024 * 1024,
-        queue_wait_timeout_ms=1000),
+        queue_wait_timeout_ms=1000)
+      + " --enable_admission_service_mem_safeguard=false",
       statestored_args=_STATESTORED_ARGS)
   def test_timeout_reason_host_memory(self):
     self.client.set_configuration_option('enable_trivial_query_for_admission', 'false')
@@ -1134,7 +1135,8 @@ class TestAdmissionController(TestAdmissionControllerBase):
   @CustomClusterTestSuite.with_args(
       impalad_args=impalad_admission_ctrl_flags(max_requests=10, max_queued=10,
         pool_max_mem=2 * 1024 * 1024, proc_mem_limit=20 * 1024 * 1024,
-        queue_wait_timeout_ms=1000),
+        queue_wait_timeout_ms=1000)
+      + " --enable_admission_service_mem_safeguard=false",
       statestored_args=_STATESTORED_ARGS)
   def test_timeout_reason_pool_memory(self):
     self.client.set_configuration_option('enable_trivial_query_for_admission', 'false')
@@ -2299,6 +2301,23 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
 
   @SkipIfNotHdfsMinicluster.tuned_for_minicluster
   @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+    impalad_args="--vmodule admission-controller=3 --mem_limit=10MB ")
+  def test_admission_service_low_mem_limit(self):
+    EXPECTED_REASON = "Admission rejected due to memory pressure"
+    # Test whether it will fail for a normal query.
+    failed_query_handle = self.client.execute_async(
+            "select * from functional_parquet.alltypes limit 100")
+    self.client.wait_for_impala_state(failed_query_handle, ERROR, 20)
+    profile = self.client.get_runtime_profile(failed_query_handle)
+    assert EXPECTED_REASON in profile, \
+      "Expected reason '{0}' not found in profile: {1}".format(EXPECTED_REASON, profile)
+    self.client.close_query(failed_query_handle)
+    # Test it should pass all the trivial queries.
+    self._test_trivial_queries_suc()
+
+  @SkipIfNotHdfsMinicluster.tuned_for_minicluster
+  @pytest.mark.execute_serially
   def test_retained_removed_coords_size(self):
     # Use a flag value below the hard cap (1000). Expect the value to be accepted.
     self._start_impala_cluster([
@@ -2352,7 +2371,7 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     # Max timeout for waiting on query state transitions.
     timeout_s = 10
 
-    ac = self.cluster.admissiond
+    ac = self.cluster.admissiond.service
     all_coords = self.cluster.get_all_coordinators()
     assert len(all_coords) >= 2, "Test requires at least two coordinators"
 
@@ -2363,10 +2382,9 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     handle1 = client1.execute_async(long_query)
     client1.wait_for_impala_state(handle1, RUNNING, timeout_s)
 
-    # Allow some time for the system to stabilize.
-    sleep(5)
+    ac.wait_for_metric_value("admission-control-service.num-queries", 1)
     # Capture memory usage before stressing the system.
-    old_total_bytes = ac.service.get_metric_value("tcmalloc.bytes-in-use")
+    old_total_bytes = ac.get_metric_value("tcmalloc.bytes-in-use")
     assert old_total_bytes != 0
 
     # Submit short queries to coord2 which will be queued and time out.
@@ -2382,7 +2400,7 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
         client2.close_query(handle2)
 
     # Capture memory usage after the test.
-    new_total_bytes = ac.service.get_metric_value("tcmalloc.bytes-in-use")
+    new_total_bytes = ac.get_metric_value("tcmalloc.bytes-in-use")
 
     # Ensure memory usage has not grown more than 10%, indicating no leak.
     assert new_total_bytes < old_total_bytes * 1.1
@@ -2396,6 +2414,13 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     # Cleanup clients.
     client1.close()
     client2.close()
+
+    # Verify num queries return to 0.
+    ac.wait_for_metric_value(
+      "admission-control-service.num-queries", 0)
+    num_queries_hwm = \
+      ac.get_metric_value("admission-control-service.num-queries-high-water-mark")
+    assert num_queries_hwm > 1
 
   @SkipIfNotHdfsMinicluster.tuned_for_minicluster
   @pytest.mark.execute_serially

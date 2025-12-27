@@ -36,6 +36,12 @@ set(IMPALA_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
 # Build compile commands database
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Configure ninja build pools
+set(CMAKE_JOB_POOLS compilation_pool=$ENV{IMPALA_BUILD_THREADS}
+                    link_pool=$ENV{IMPALA_LINK_THREADS})
+set(CMAKE_JOB_POOL_COMPILE compilation_pool)
+set(CMAKE_JOB_POOL_LINK link_pool)
+
 # Codegen-dependent executables need to be linked with -rdynamic; otherwise LLVM
 # can't find dependent symbols at runtime.
 #
@@ -435,6 +441,9 @@ include_directories(${OPENTELEMETRY_CPP_INCLUDE_DIR})
 # See be/src/kudu/security/krb5_realm_override.cc for more information.
 set(KRB5_REALM_OVERRIDE -Wl,--undefined=krb5_realm_override_loaded krb5_realm_override)
 
+# find Arrow headers and libs
+find_package(Arrow REQUIRED)
+IMPALA_ADD_THIRDPARTY_LIB(arrow ${ARROW_INCLUDE_DIR} ${ARROW_STATIC_LIB} "")
 ###################################################################
 
 # System dependencies
@@ -527,9 +536,10 @@ add_custom_target(cscope ALL DEPENDS gen-deps
   COMMAND "${CMAKE_SOURCE_DIR}/bin/gen-cscope.sh"
 )
 
-add_custom_target(impala_python ALL
-  COMMAND "${CMAKE_SOURCE_DIR}/bin/init-impala-python.sh"
-)
+# IMPALA-14606: Stop building impala_python (Python 2) by default.
+# add_custom_target(impala_python ALL
+#   COMMAND "${CMAKE_SOURCE_DIR}/bin/init-impala-python.sh"
+# )
 
 add_custom_target(impala_python3 ALL
   COMMAND "${CMAKE_SOURCE_DIR}/bin/init-impala-python.sh" "-python3"
@@ -545,7 +555,7 @@ endif()
 add_custom_target(impala_shell_pypi ALL DEPENDS ${IMPALA_PYTHON_INSTALLS})
 
 add_custom_target(notests_independent_targets DEPENDS
-  java cscope tarballs impala_python impala_python3 impala_shell_pypi
+  java cscope tarballs impala_python3 impala_shell_pypi
 )
 add_custom_target(notests_regular_targets DEPENDS
   impalad statestored catalogd admissiond fesupport loggingsupport ImpalaUdf udasample udfsample impala-profile-tool

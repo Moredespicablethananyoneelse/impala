@@ -29,6 +29,7 @@ import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.common.RuntimeEnv;
 import org.apache.impala.service.BackendConfig;
+import org.apache.impala.service.FeSupport;
 import org.apache.impala.thrift.TDescribeOutputStyle;
 import org.apache.impala.thrift.TPrivilegeLevel;
 import org.apache.impala.thrift.TQueryOptions;
@@ -64,6 +65,10 @@ public class AuthorizationStmtTest extends AuthorizationTestBase {
   public AuthorizationStmtTest(AuthorizationProvider authzProvider)
       throws ImpalaException {
     super(authzProvider);
+  }
+
+  static {
+    FeSupport.loadLibrary();
   }
 
   @BeforeClass
@@ -1339,6 +1344,30 @@ public class AuthorizationStmtTest extends AuthorizationTestBase {
             .ok(onTable("functional", "alltypes", privilege));
       }
       authzTest.error(accessError("functional"));
+    }
+
+    // Show files for Iceberg tables
+    AuthzTest authzTestIce =
+        authorize("show files in functional_parquet.iceberg_partitioned");
+    for (TPrivilegeLevel privilege : viewMetadataPrivileges()) {
+      authzTestIce.ok(onServer(privilege))
+          .ok(onDatabase("functional_parquet", privilege))
+          .ok(onTable("functional_parquet", "iceberg_partitioned", privilege));
+    }
+    authzTestIce.error(accessError("functional_parquet"));
+
+    // Show files for Iceberg tables with partition filter; more restrictive
+    for (AuthzTest authzTest: new AuthzTest[]{
+        authorize("show files in functional_parquet.iceberg_partitioned " +
+            "partition(action='view')"),
+        authorize("show files in functional_parquet.iceberg_partitioned " +
+            "partition(action='click')")}) {
+      for (TPrivilegeLevel privilege : new TPrivilegeLevel[] {
+              TPrivilegeLevel.ALL, TPrivilegeLevel.OWNER, TPrivilegeLevel.SELECT}) {
+        authzTest.ok(onServer(privilege))
+            .ok(onDatabase("functional_parquet", privilege))
+            .ok(onTable("functional_parquet", "iceberg_partitioned", privilege));
+      }
     }
 
     // Show current roles should always be allowed.
@@ -2639,9 +2668,7 @@ public class AuthorizationStmtTest extends AuthorizationTestBase {
             .error(accessError(true, "nodb"), onServer(true, allExcept(
                 TPrivilegeLevel.ALL, TPrivilegeLevel.OWNER)));
       }
-    } finally {
-      authzCatalog_.removeRole("foo");
-    }
+    } finally { authzCatalog_.removeRole("foo"); }
     boolean exceptionThrown = false;
     try {
       parseAndAnalyze("alter database functional set owner role foo",

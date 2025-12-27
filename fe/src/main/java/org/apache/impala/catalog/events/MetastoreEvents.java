@@ -34,6 +34,7 @@ import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
@@ -136,6 +137,7 @@ public class MetastoreEvents {
     INSERT("INSERT"),
     INSERT_PARTITIONS("INSERT_PARTITIONS"),
     RELOAD("RELOAD"),
+    RELOAD_PARTITIONS("RELOAD_PARTITIONS"),
     ALLOC_WRITE_ID_EVENT("ALLOC_WRITE_ID_EVENT"),
     COMMIT_TXN("COMMIT_TXN"),
     ABORT_TXN("ABORT_TXN"),
@@ -628,6 +630,23 @@ public class MetastoreEvents {
     // metrics registry so that events can add metrics
     protected final Metrics metrics_;
 
+    // Event creation time. It is initialized in constructor. It is not used for
+    // DerivedMetastoreEvent.
+    protected final long creationTime_;
+
+    // Event dispatch time. It is initialized after dispatching actual event. It is not
+    // set for DerivedMetastoreEvent.
+    protected long dispatchTime_;
+
+    // Whether it is delimiter event. It is set only when hierarchical event processing is
+    // enabled. Delimiter is a kind of metastore event that do not require event
+    // processing. Delimeter event can be:
+    // 1. A CommitTxnEvent that do not have any write event info for a given transaction.
+    // 2. An AbortTxnEvent that do not have write ids for a given transaction.
+    // 3. An IgnoredEvent.
+    // An event is determined and marked as delimiter in EventExecutorService#dispatch()
+    protected boolean isDelimiter_;
+
     protected MetastoreEvent(CatalogOpExecutor catalogOpExecutor, Metrics metrics,
         NotificationEvent event) {
       this.catalogOpExecutor_ = catalogOpExecutor;
@@ -641,6 +660,54 @@ public class MetastoreEvents {
       this.tblName_ = event.getTableName();
       this.metastoreNotificationEvent_ = event;
       this.metrics_ = metrics;
+      this.creationTime_ = System.currentTimeMillis();
+    }
+
+    /**
+     * Gets metastore event creation time.
+     * @return Creation time
+     */
+    long getCreationTime() {
+      return creationTime_;
+    }
+
+    /**
+     * Gets metastore event dispatch time.
+     * @return Dispatch time
+     */
+    long getDispatchTime() {
+      if (this instanceof DerivedMetastoreEvent) {
+        return ((DerivedMetastoreEvent) this).getActualEvent().dispatchTime_;
+      }
+      return dispatchTime_;
+    }
+
+    /**
+     * Sets the metastore event dispatch time. It can be initialized only once after
+     * dispatching the event.
+     * @param dispatchTime Time when event is dispatched
+     */
+    void setDispatchTime(long dispatchTime) {
+      Preconditions.checkState(dispatchTime_ == 0, "Dispatch time can be set only once");
+      Preconditions.checkState(!(this instanceof DerivedMetastoreEvent),
+          "Not allowed to set on derived metastore event currently");
+      dispatchTime_ = dispatchTime;
+    }
+
+    /**
+     * To determine whether it is a delimiter event.
+     * @return True if delimiter event. False otherwise
+     */
+    public boolean isDelimiter() {
+      return isDelimiter_;
+    }
+
+    /**
+     * Set the event as delimiter.
+     * @param delimiter
+     */
+    public void setDelimiter(boolean delimiter) {
+      isDelimiter_ = delimiter;
     }
 
     public long getEventId() { return eventId_; }
@@ -713,16 +780,21 @@ public class MetastoreEvents {
      */
     public void processIfEnabled()
         throws CatalogException, MetastoreNotificationException {
+      boolean isNotDerivedEvent = !(this instanceof DerivedMetastoreEvent);
       if (isEventProcessingDisabled()) {
         infoLog("Skipping this event because of flag evaluation");
-        metrics_.getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).inc();
-        debugLog("Incremented skipped metric to " + metrics_
-            .getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).getCount());
+        if (isNotDerivedEvent) {
+          metrics_.getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).inc();
+          debugLog("Incremented skipped metric to " + metrics_.getCounter(
+              MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).getCount());
+        }
         return;
       }
       if (BackendConfig.INSTANCE.enableSyncToLatestEventOnDdls()) {
         if (shouldSkipWhenSyncingToLatestEventId()) {
-          metrics_.getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).inc();
+          if (isNotDerivedEvent) {
+            metrics_.getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC).inc();
+          }
           return;
         }
       }
@@ -995,9 +1067,124 @@ public class MetastoreEvents {
   }
 
   /**
-   * Marker interface for derived metastore event
+   * Interface for derived metastore event
    */
   public interface DerivedMetastoreEvent {
+    // Gets the actual metastore event.
+    MetastoreEvent getActualEvent();
+
+    // Marks the derived event as processed.
+    void markProcessed();
+
+    // Determines whether all the derived event associated with actual event are
+    // processed.
+    boolean isAllDerivedEventsProcessed();
+  }
+
+  /**
+   *
+   */
+  public static class DerivedMetastoreEventContext {
+    // Total count of derived table events associated to actual table event. When a
+    // derived event is processed, this count is decremented by 1. Once the count becomes
+    // 0, actual table event is treated as processed.
+    private final AtomicInteger derivedEventsCount_;
+
+    // Actual metastore event the event is derived from.
+    private final MetastoreEvent actualEvent_;
+
+    public DerivedMetastoreEventContext(MetastoreEvent actualEvent,
+        int derivedEventsCount) {
+      Preconditions.checkArgument(actualEvent != null);
+      derivedEventsCount_ = new AtomicInteger(derivedEventsCount);
+      actualEvent_ = actualEvent;
+    }
+
+    public DerivedMetastoreEventContext(MetastoreEvent actualEvent) {
+      Preconditions.checkArgument(actualEvent != null);
+      derivedEventsCount_ = new AtomicInteger(0);
+      actualEvent_ = actualEvent;
+    }
+
+    /**
+     * Sets the derived metastore event count. Need to be initialized only once.
+     * @param count Derived metastore event count
+     */
+    public void setDerivedEventsCount(int count) {
+      Preconditions.checkState(derivedEventsCount_.get() == 0,
+          "Derived events count can be set only once");
+      derivedEventsCount_.set(count);
+    }
+
+    public MetastoreEvent getActualEvent() {
+      return actualEvent_;
+    }
+  }
+
+  /**
+   * Abstract class for derived metastore table event. A single actual MetastoreEvent can
+   * have multiple DerivedMetastoreTableEvent associated with it.
+   */
+  public static abstract class DerivedMetastoreTableEvent extends MetastoreTableEvent
+      implements DerivedMetastoreEvent {
+
+    private final DerivedMetastoreEventContext context_;
+
+    // Whether the current derived table event is processed.
+    private boolean isProcessed_ = false;
+
+    DerivedMetastoreTableEvent(CatalogOpExecutor catalogOpExecutor, Metrics metrics,
+        NotificationEvent event, DerivedMetastoreEventContext context) {
+      super(catalogOpExecutor, metrics, event);
+      Preconditions.checkArgument(context.derivedEventsCount_ != null);
+      context_ = context;
+    }
+
+    DerivedMetastoreTableEvent(DerivedMetastoreEventContext context,
+        NotificationEvent event) {
+      this(context.getActualEvent().getCatalogOpExecutor(),
+          context.getActualEvent().getMetrics(), event, context);
+    }
+
+    protected DerivedMetastoreTableEvent(DerivedMetastoreEventContext context) {
+      this(context.getActualEvent().getCatalogOpExecutor(),
+          context.getActualEvent().getMetrics(), context.getActualEvent().getEvent(),
+          context);
+    }
+
+    /**
+     * Gets the actual metastore event.
+     * @return Actual metastore event this event is associated to
+     */
+    @Override
+    public MetastoreEvent getActualEvent() {
+      return context_.getActualEvent();
+    }
+
+    /**
+     * Marks the current derived event as processed.
+     * <p>
+     * This method must be called only once per derived event instance. It decrements the
+     * count of remaining derived events associated with the actual event.
+     */
+    @Override
+    public void markProcessed() {
+      Preconditions.checkState(!isProcessed_, "Event already processed");
+      isProcessed_ = true;
+      Preconditions.checkState(context_.derivedEventsCount_.decrementAndGet() >= 0);
+    }
+
+    /**
+     * Determines whether the all the derived event associated with actual event are
+     * processed. The actual event is treated as processed only when all its associated
+     * derived events are processed.
+     *
+     * @return True if all derived events are processed. False otherwise.
+     */
+    @Override
+    public boolean isAllDerivedEventsProcessed() {
+      return context_.derivedEventsCount_.get() == 0;
+    }
   }
 
   /**
@@ -1068,9 +1255,17 @@ public class MetastoreEvents {
                 + "database {}",
             MetastoreEventPropertyKey.DISABLE_EVENT_HMS_SYNC.getKey(),
             dbFlagVal, dbName_);
+        // flag value of null also returns false
+        return Boolean.valueOf(dbFlagVal);
       }
-      // flag value of null also returns false
-      return Boolean.valueOf(dbFlagVal);
+      boolean globalDisableHmsSync = BackendConfig.INSTANCE.isDisableHmsSyncByDefault();
+      if (globalDisableHmsSync) {
+        debugLog("Table level for table {} or Db level for db {}, flag {} is not set. " +
+                "Global flag disable_hms_sync_by_default is set to {}",
+            msTbl_.getTableName(), dbName_, MetastoreEventPropertyKey
+                .DISABLE_EVENT_HMS_SYNC.getKey(), globalDisableHmsSync);
+      }
+      return globalDisableHmsSync;
     }
 
     /**
@@ -1421,7 +1616,7 @@ public class MetastoreEvents {
     protected void process() throws MetastoreNotificationException, CatalogException {
       Timer.Context context = null;
       org.apache.impala.catalog.Table tbl = catalog_.getTableNoThrow(dbName_, tblName_);
-      if (tbl != null) {
+      if (tbl != null && !(tbl instanceof IncompleteTable)) {
         context = tbl.getMetrics().getTimer(TBL_EVENTS_PROCESS_DURATION).time();
       }
       try {
@@ -2991,8 +3186,9 @@ public class MetastoreEvents {
           partitions.add(event.getPartitionForBatching());
         }
         try {
-          if (baseEvent_ instanceof InsertEvent) {
-            // for insert event, always reload file metadata so that new files
+          if ((baseEvent_ instanceof InsertEvent) ||
+              (baseEvent_ instanceof ReloadEvent)) {
+            // for insert & reload events, always reload file metadata so that new files
             // are reflected in HdfsPartition
             reloadPartitions(partitions, FileMetadataLoadOpts.FORCE_LOAD, getEventDesc(),
                 true);
@@ -3332,6 +3528,41 @@ public class MetastoreEvents {
       }
     }
 
+    @Override
+    public boolean canBeBatched(MetastoreEvent event) {
+      if (!(event instanceof ReloadEvent)) return false;
+      if (isOlderThanLastSyncEventId(event)) return false;
+      ReloadEvent reloadEvent = (ReloadEvent) event;
+      // make sure that the event is on the same table
+      if (!getFullyQualifiedTblName().equalsIgnoreCase(
+          reloadEvent.getFullyQualifiedTblName())) {
+        return false;
+      }
+      // we currently only batch partition level reload events
+      if (this.reloadPartition_ == null || reloadEvent.reloadPartition_ == null) {
+        return false;
+      }
+      return true;
+    }
+
+    @Override
+    public MetastoreEvent addToBatchEvents(MetastoreEvent event) {
+      if (!(event instanceof ReloadEvent)) return null;
+      BatchPartitionEvent<ReloadEvent> batchEvent = new BatchPartitionEvent<>(
+          this);
+      Preconditions.checkState(batchEvent.canBeBatched(event));
+      batchEvent.addToBatchEvents(event);
+      return batchEvent;
+    }
+
+    @Override
+    protected Partition getPartitionForBatching() { return reloadPartition_; }
+
+    @Override
+    protected MetastoreEventType getBatchEventType() {
+      return MetastoreEventType.RELOAD_PARTITIONS;
+    }
+
     private void processTableInvalidate() throws MetastoreNotificationException {
       Reference<Boolean> tblWasRemoved = new Reference<>();
       Reference<Boolean> dbWasAdded = new Reference<>();
@@ -3454,15 +3685,14 @@ public class MetastoreEvents {
   /**
    * Pseudo abort transaction event handles abort processing for a table
    */
-  public static class PseudoAbortTxnEvent extends MetastoreTableEvent
-      implements DerivedMetastoreEvent {
+  public static class PseudoAbortTxnEvent extends DerivedMetastoreTableEvent {
     final private long txnId_;
     final private List<Long> writeIds_;
 
-    PseudoAbortTxnEvent(AbortTxnEvent actualEvent, String dbName, String tableName,
-        List<Long> writeIds) {
-      super(actualEvent.catalogOpExecutor_, actualEvent.metrics_, actualEvent.event_);
-      txnId_ = actualEvent.txnId_;
+    PseudoAbortTxnEvent(DerivedMetastoreEventContext context, String dbName,
+        String tableName, List<Long> writeIds) {
+      super(context);
+      txnId_ = ((AbortTxnEvent) context.getActualEvent()).txnId_;
       writeIds_ = writeIds;
       dbName_ = dbName;
       tblName_ = tableName;
@@ -3489,7 +3719,14 @@ public class MetastoreEvents {
 
     @Override
     protected boolean isEventProcessingDisabled() {
-      return false;
+      org.apache.impala.catalog.Table tbl = catalog_.getTableNoThrow(dbName_, tblName_);
+      if (tbl != null && tbl.getCreateEventId() < getEventId()) {
+        msTbl_ = tbl.getMetaStoreTable();
+      }
+      if (msTbl_ == null) {
+        return false;
+      }
+      return super.isEventProcessingDisabled();
     }
 
     @Override
@@ -3569,10 +3806,7 @@ public class MetastoreEvents {
    */
   public static class IgnoredEvent extends MetastoreEvent {
 
-    /**
-     * Prevent instantiation from outside should use MetastoreEventFactory instead
-     */
-    private IgnoredEvent(
+    public IgnoredEvent(
         CatalogOpExecutor catalogOpExecutor, Metrics metrics, NotificationEvent event) {
       super(catalogOpExecutor, metrics, event);
     }

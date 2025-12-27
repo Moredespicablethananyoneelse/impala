@@ -41,7 +41,7 @@ IMPALA_LOCAL_VERSION_INFO = os.path.join(IMPALA_HOME, "bin/version.info")
 if os.path.isfile(IMPALA_LOCAL_VERSION_INFO):
   with open(IMPALA_LOCAL_VERSION_INFO) as f:
     for line in f:
-      match = re.match("VERSION: ([^\s]*)\n", line)
+      match = re.match(r"VERSION: ([^\s]*)\n", line)
       if match:
         IMPALA_LOCAL_BUILD_VERSION = match.group(1)
   if IMPALA_LOCAL_BUILD_VERSION is None:
@@ -77,7 +77,25 @@ else:
   MANAGED_WAREHOUSE_DIR = 'test-warehouse'
 EXTERNAL_WAREHOUSE_DIR = 'test-warehouse'
 
-IS_APACHE_HIVE = os.environ.get("USE_APACHE_HIVE", False) == 'true'
+# Set Iceberg's default format version based on version, if <1.4 it's 1, if >=1.4 then 2
+impala_iceberg_version = os.environ.get("IMPALA_ICEBERG_VERSION")
+
+ICEBERG_DEFAULT_FORMAT_VERSION = '1'
+if impala_iceberg_version:
+  # Extract the major and minor version numbers
+  version_parts = impala_iceberg_version.split('.')
+  if len(version_parts) >= 2:
+    try:
+      major = int(version_parts[0])
+      minor = int(version_parts[1])
+      # If version is 1.4 or higher, use format version 2
+      if major > 1 or (major == 1 and minor >= 4):
+        ICEBERG_DEFAULT_FORMAT_VERSION = '2'
+    except ValueError:
+      # If we can't parse the version, default to format version 1
+      pass
+
+IS_APACHE_HIVE = os.environ.get("USE_APACHE_HIVE_3", False) == 'true'
 
 # Resolve any symlinks in the path.
 impalad_basedir = \
@@ -395,7 +413,7 @@ class ImpalaTestClusterProperties(object):
     Checks if --hms_event_polling_interval_s is set to non-zero value"""
     try:
       key = "hms_event_polling_interval_s"
-      return key in self.catalogd_runtime_flags and int(
+      return key in self.catalogd_runtime_flags and float(
         self._catalogd_runtime_flags[key]["current"]) > 0
     except Exception:
       if self.is_remote_cluster():
@@ -403,6 +421,22 @@ class ImpalaTestClusterProperties(object):
         LOG.exception(
           "Failed to get flags from web UI, assuming event polling is disabled")
         return False
+      raise
+
+  def is_hierarchical_event_processing_enabled(self):
+    """Whether hierarchical event processing is enabled"""
+    try:
+      key = "enable_hierarchical_event_processing"
+      return self.is_event_polling_enabled() and key in self.catalogd_runtime_flags \
+          and self.runtime_flags[key]["current"] == "true"
+    except Exception:
+      if self.is_remote_cluster():
+        # IMPALA-8553: be more tolerant of failures on remote cluster builds.
+        LOG.exception(
+          "Failed to get flags from web UI, assuming hierarchical event processing is "
+          "disabled")
+        return False
+      raise
 
 def build_flavor_timeout(default_timeout, slow_build_timeout=None,
         asan_build_timeout=None, code_coverage_build_timeout=None):

@@ -20,6 +20,7 @@ package org.apache.impala.calcite.coercenodes;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
@@ -105,6 +106,12 @@ public class CoerceOperandShuttle extends RexShuttle {
     // recursively call all embedded RexCalls first
     RexCall castedOperandsCall = (RexCall) super.visitCall(call);
 
+    // For parquet statistics predicates to be used, the input ref needs to be
+    // on the left side of a comparison operator and any extraneous casts need
+    // to be removed.
+    castedOperandsCall = (RexCall) normalizeCompareOperator(castedOperandsCall);
+
+
     // need to 'flatten' before putting it back into a filter or else some
     // tpcds queries will fail in the junit tests because of an assert statement
     // in the Filter constructor.
@@ -186,7 +193,8 @@ public class CoerceOperandShuttle extends RexShuttle {
   @Override
   public RexNode visitLiteral(RexLiteral literal) {
     // Coerce CHAR literal types into STRING
-    if (literal.getType().getSqlTypeName().equals(SqlTypeName.CHAR)) {
+    if (!literal.isNull() &&
+        (literal.getType().getSqlTypeName().equals(SqlTypeName.CHAR))) {
       return rexBuilder.makeLiteral(RexLiteral.stringValue(literal),
           ImpalaTypeConverter.getRelDataType(Type.STRING), true, true);
     }
@@ -211,7 +219,15 @@ public class CoerceOperandShuttle extends RexShuttle {
   }
 
 
-  private RelDataType getReturnType(RexNode rexNode, Type impalaReturnType) {
+  private RelDataType getReturnType(RexCall rexCall, Type impalaReturnType) {
+    // Case is a special case. Currently, there is a quirk in the Impala function
+    // resolver where it always returns the BOOLEAN signature. So the return type
+    // is evaluated here by finding the compatible type amongst the "then" clauses.
+    if (rexCall.getKind() == SqlKind.CASE) {
+        List<RelDataType> argTypes =
+            Lists.transform(rexCall.getOperands(), RexNode::getType);
+        return ImpalaTypeConverter.getCompatibleTypeForCase(argTypes, factory);
+    }
 
     RelDataType retType = ImpalaTypeConverter.getRelDataType(impalaReturnType);
 
@@ -221,15 +237,32 @@ public class CoerceOperandShuttle extends RexShuttle {
     // have to calculate the precision and scale based on operand types. If
     // necessary, this code should be added later.
     Preconditions.checkState(!SqlTypeUtil.isDecimal(retType) ||
-        SqlTypeUtil.isDecimal(rexNode.getType()));
+        SqlTypeUtil.isDecimal(rexCall.getType()));
 
     // So if the original return type is Decimal and the function resolves to
     // decimal, the precision and scale are saved from the original function.
     if (SqlTypeUtil.isDecimal(retType)) {
-      retType = rexNode.getType();
+      retType = rexCall.getType();
     }
 
     return retType;
+  }
+
+  private RexNode normalizeCompareOperator(RexCall call) {
+    if (!SqlKind.BINARY_COMPARISON.contains(call.getKind())) {
+      return call;
+    }
+
+    RexNode leftOperand = call.getOperands().get(0);
+    RexNode rightOperand = call.getOperands().get(1);
+
+    if (RexUtil.containsInputRef(leftOperand) ||
+        !RexUtil.containsInputRef(rightOperand)) {
+      return call;
+    }
+
+    return rexBuilder.makeCall(call.getType(), call.getOperator().reverse(),
+        Lists.newArrayList(rightOperand, leftOperand));
   }
 
   private boolean isCastingNeeded(RexCall rexCall) {
@@ -348,6 +381,14 @@ public class CoerceOperandShuttle extends RexShuttle {
     if (toImpalaType.equals(Type.CHAR) &&
         fromType.getSqlTypeName().equals(SqlTypeName.CHAR)) {
       return fromType;
+    }
+
+    // If both are varchar, return STRING type which
+    // covers the wildcard varchar and all varchar cases.
+    if (toImpalaType.equals(Type.VARCHAR)) {
+      if (fromType.getSqlTypeName().equals(SqlTypeName.VARCHAR)) {
+        return ImpalaTypeConverter.getRelDataType(Type.STRING);
+      }
     }
 
     if (!toImpalaType.isDecimal() || SqlTypeUtil.isNull(fromType)) {

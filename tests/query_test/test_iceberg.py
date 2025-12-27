@@ -1564,6 +1564,10 @@ class TestIcebergTable(IcebergTestSuite):
     assert snapshots[0].get_parent_id() == snapshots[2].get_parent_id()
     assert snapshots[0].get_creation_time() < snapshots[2].get_creation_time()
 
+  def test_show_files_partition(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-show-files-partition', vector,
+                       use_db=unique_database)
+
   def test_scan_metrics_in_profile_basic(self, vector):
     self.run_test_case('QueryTest/iceberg-scan-metrics-basic', vector)
 
@@ -1592,6 +1596,10 @@ class TestIcebergV2Table(IcebergTestSuite):
   def test_plain_count_star_optimization(self, vector):
       self.run_test_case('QueryTest/iceberg-v2-plain-count-star-optimization',
                          vector)
+
+  def test_count_star_optimization_in_complex_query(self, vector, unique_database):
+      self.run_test_case('QueryTest/iceberg-v2-count-star-optimization-in-complex-query',
+                         vector, unique_database)
 
   @SkipIfDockerizedCluster.internal_hostname
   @SkipIf.hardcoded_uris
@@ -2188,6 +2196,11 @@ class TestIcebergV2Table(IcebergTestSuite):
     vector.unset_exec_option('num_nodes')
     self.run_test_case('QueryTest/iceberg-merge-duplicate-check', vector, unique_database)
 
+  def test_writing_multiple_deletes_per_partition(self, vector, unique_database):
+    """Test writing multiple delete files partition in a single DELETE operation."""
+    self.run_test_case('QueryTest/iceberg-multiple-delete-per-partition', vector,
+        use_db=unique_database)
+
   def test_cleanup(self, unique_database):
       """Test that all uncommitted files written by Impala are removed from the file
       system when a DML commit to an Iceberg table fails, and that the effects of the
@@ -2230,6 +2243,59 @@ class TestIcebergV2Table(IcebergTestSuite):
   def test_predicate_push_down_hint(self, vector, unique_database):
     self.run_test_case('QueryTest/iceberg-predicate-push-down-hint', vector,
                        use_db=unique_database)
+
+  def test_partitions(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-partitions', vector, unique_database)
+    tbl_name = unique_database + ".ice_num_partitions"
+    snapshots = get_snapshots(self.client, tbl_name, expected_result_size=4)
+    second_snapshot = snapshots[1]
+    time_travel_data = self.execute_query(
+        "SELECT * FROM {0} for system_version as of {1};".format(
+            tbl_name, second_snapshot.get_snapshot_id()))
+    assert "partitions=4/unknown" in time_travel_data.runtime_profile
+    selective_time_travel_data = self.execute_query(
+        "SELECT * FROM {0} for system_version as of {1} WHERE id < 5;".format(
+            tbl_name, second_snapshot.get_snapshot_id()))
+    assert "partitions=2/unknown" in selective_time_travel_data.runtime_profile
+
+  def test_table_repair(self, unique_database):
+    tbl_name = 'tbl_with_removed_files'
+    db_tbl = unique_database + "." + tbl_name
+    repair_query = "alter table {0} execute repair_metadata()"
+    with self.create_impala_client() as impalad_client:
+      impalad_client.execute(
+          "create table {0} (i int) stored as iceberg tblproperties('format-version'='2')"
+          .format(db_tbl))
+      insert_q = "insert into {0} values ({1})"
+      self.execute_query_expect_success(impalad_client, insert_q.format(db_tbl, 1))
+      self.execute_query_expect_success(impalad_client, insert_q.format(db_tbl, 2))
+      self.execute_query_expect_success(impalad_client, insert_q.format(db_tbl, 3))
+      self.execute_query_expect_success(impalad_client, insert_q.format(db_tbl, 4))
+      self.execute_query_expect_success(impalad_client, insert_q.format(db_tbl, 5))
+      result = impalad_client.execute('select i from {0} order by i'.format(db_tbl))
+      assert result.data == ['1', '2', '3', '4', '5']
+
+      TABLE_PATH = '{0}/{1}.db/{2}'.format(WAREHOUSE, unique_database, tbl_name)
+      DATA_PATH = os.path.join(TABLE_PATH, "data")
+
+      # Check that table remains intact if there are no missing files
+      result = self.execute_query_expect_success(
+          impalad_client, repair_query.format(db_tbl))
+      assert result.data[0] == "No missing data files detected."
+      result = impalad_client.execute('select i from {0} order by i'.format(db_tbl))
+      assert result.data == ['1', '2', '3', '4', '5']
+
+      # Delete 2 data files from the file system directly to corrupt the table.
+      data_files = self.filesystem_client.ls(DATA_PATH)
+      self.filesystem_client.delete_file_dir(DATA_PATH + "/" + data_files[0])
+      self.filesystem_client.delete_file_dir(DATA_PATH + "/" + data_files[1])
+      self.execute_query_expect_success(impalad_client, "invalidate metadata")
+      result = self.execute_query_expect_success(
+          impalad_client, repair_query.format(db_tbl))
+      assert result.data[0] == \
+          "Iceberg table repaired by deleting 2 manifest entries of missing data files."
+      result = impalad_client.execute('select * from {0} order by i'.format(db_tbl))
+      assert len(result.data) == 3
 
 
 # Tests to exercise the DIRECTED distribution mode for V2 Iceberg tables. Note, that most

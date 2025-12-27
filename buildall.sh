@@ -80,7 +80,7 @@ BUILD_DEBUG_NOOPT=0
 BUILD_SHARED_LIBS=0
 UDF_DEVEL=0
 # Export MAKE_CMD so it is visible in scripts that invoke make, e.g. copy-udfs-udas.sh
-export MAKE_CMD=make
+export MAKE_CMD=${IMPALA_MAKE_CMD:-make}
 
 # Defaults that can be picked up from the environment, but are overridable through the
 # commandline.
@@ -202,6 +202,9 @@ do
       ;;
     -ninja)
       MAKE_CMD=ninja
+      ;;
+    -make)
+      MAKE_CMD=make
       ;;
     -cmake_only)
       GEN_CMAKE_ONLY=1
@@ -424,7 +427,7 @@ bootstrap_dependencies() {
 
   # Populate necessary thirdparty components unless it's set to be skipped.
   if [[ "${SKIP_TOOLCHAIN_BOOTSTRAP}" = true ]]; then
-    if ! [ -z "${NATIVE_TOOLCHAIN_HOME}" ]; then
+    if ! [ -z "${NATIVE_TOOLCHAIN_HOME-}" ]; then
       if ! [ -d "${NATIVE_TOOLCHAIN_HOME}" ]; then
         mkdir -p "${NATIVE_TOOLCHAIN_HOME}"
         pushd "${NATIVE_TOOLCHAIN_HOME}"
@@ -457,7 +460,7 @@ bootstrap_dependencies() {
     cp $IMPALA_TOOLCHAIN_PACKAGES_HOME/hadoop-client-$IMPALA_HADOOP_CLIENT_VERSION/lib/* \
         $HADOOP_HOME/lib/native/
   fi
-  if [[ "${USE_APACHE_HIVE}" = true ]]; then
+  if [[ "${USE_APACHE_HIVE_3}" = true ]]; then
     "$IMPALA_HOME/testdata/bin/patch_hive.sh"
   fi
 }

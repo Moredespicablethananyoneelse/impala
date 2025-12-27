@@ -84,6 +84,7 @@ import org.apache.impala.fb.FbIcebergMetadata;
 import org.apache.impala.planner.JoinNode.DistributionMode;
 import org.apache.impala.service.Frontend;
 import org.apache.impala.thrift.TColumnStats;
+import org.apache.impala.thrift.TIcebergPartition;
 import org.apache.impala.thrift.TIcebergPartitionTransformType;
 import org.apache.impala.thrift.TQueryOptions;
 import org.apache.impala.thrift.TVirtualColumnType;
@@ -246,12 +247,13 @@ public class IcebergScanPlanner {
 
   private PlanNode createIcebergScanPlanImpl() throws ImpalaException {
     if (noDeleteFiles()) {
-      Preconditions.checkState(
-          !ctx_.getQueryCtx().isOptimize_count_star_for_iceberg_v2());
+      Preconditions.checkState(!tblRef_.optimizeCountStarForIcebergV2());
       // If there are no delete files we can just create a single SCAN node.
       Preconditions.checkState(dataFilesWithDeletes_.isEmpty());
       PlanNode ret = new IcebergScanNode(ctx_.getNextNodeId(), tblRef_, conjuncts_,
-          aggInfo_, dataFilesWithoutDeletes_, nonIdentityConjuncts_,
+          aggInfo_, dataFilesWithoutDeletes_,
+          getIceTable().getContentFileStore().getNumPartitions(),
+          nonIdentityConjuncts_,
           getSkippedConjuncts(), snapshotId_);
       ret.init(analyzer_);
       return ret;
@@ -266,7 +268,7 @@ public class IcebergScanPlanner {
     // If the count star query can be optimized for Iceberg V2 table, the number of rows
     // of all DataFiles without corresponding DeleteFiles can be calculated by Iceberg
     // meta files, it's added using ArithmeticExpr.
-    if (ctx_.getQueryCtx().isOptimize_count_star_for_iceberg_v2()) return joinNode;
+    if (tblRef_.optimizeCountStarForIcebergV2()) return joinNode;
 
     // All data files has corresponding delete files, so we just return an ANTI JOIN
     // between all data files and all delete files.
@@ -276,6 +278,7 @@ public class IcebergScanPlanner {
     // can just create a SCAN node for these and do a UNION ALL with the ANTI JOIN.
     IcebergScanNode dataScanNode = new IcebergScanNode(
         ctx_.getNextNodeId(), tblRef_, conjuncts_, aggInfo_, dataFilesWithoutDeletes_,
+        getIceTable().getContentFileStore().getNumPartitions(),
         nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_);
     dataScanNode.init(analyzer_);
     List<Expr> outputExprs = tblRef_.getDesc().getSlots().stream().map(
@@ -315,6 +318,7 @@ public class IcebergScanPlanner {
     addDeletePositionSlots(deleteDeltaRef);
     IcebergScanNode dataScanNode = new IcebergScanNode(
         dataScanNodeId, tblRef_, conjuncts_, aggInfo_, dataFilesWithDeletes_,
+        getIceTable().getContentFileStore().getNumPartitions(),
         nonIdentityConjuncts_, getSkippedConjuncts(), deleteScanNodeId, snapshotId_);
     dataScanNode.init(analyzer_);
     IcebergScanNode deleteScanNode = new IcebergScanNode(
@@ -323,6 +327,7 @@ public class IcebergScanPlanner {
         Collections.emptyList(), /*conjuncts*/
         aggInfo_,
         Lists.newArrayList(positionDeleteFiles_),
+        getIceTable().getContentFileStore().getNumPartitions(),
         Collections.emptyList(), /*nonIdentityConjuncts*/
         Collections.emptyList(), /*skippedConjuncts*/
         snapshotId_);
@@ -526,6 +531,7 @@ public class IcebergScanPlanner {
       PlanNodeId dataScanNodeId = ctx_.getNextNodeId();
       IcebergScanNode dataScanNode = new IcebergScanNode(
           dataScanNodeId, tblRef_, conjuncts_, aggInfo_, dataFilesWithDeletes_,
+          getIceTable().getContentFileStore().getNumPartitions(),
           nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_);
       addAllSlotsForEqualityDeletes(tblRef_);
       dataScanNode.init(analyzer_);
@@ -564,6 +570,7 @@ public class IcebergScanPlanner {
           Collections.emptyList(), /*conjuncts*/
           aggInfo_,
           Lists.newArrayList(equalityDeleteFiles),
+          getIceTable().getContentFileStore().getNumPartitions(),
           Collections.emptyList(), /*nonIdentityConjuncts*/
           Collections.emptyList(),
           snapshotId_); /*skippedConjuncts*/
@@ -622,6 +629,7 @@ public class IcebergScanPlanner {
     Preconditions.checkState(equalityIdsToDeleteFiles_.isEmpty());
 
     TimeTravelSpec timeTravelSpec = tblRef_.getTimeTravelSpec();
+    IcebergContentFileStore fileStore = getIceTable().getContentFileStore();
 
     // 'metricsReporter_' is filled when the try-with-resources releases the FileScanTask
     // iterable, i.e. not when the call to IcebergUtil.planFiles() returns.
@@ -638,14 +646,15 @@ public class IcebergScanPlanner {
           residualExpressions_.add(residualExpr);
         }
         Pair<IcebergFileDescriptor, Boolean> fileDesc =
-            getFileDescriptor(fileScanTask.file());
+            getFileDescriptor(fileScanTask.file(), fileStore);
         if (!fileDesc.second) ++dataFilesCacheMisses;
         if (fileScanTask.deletes().isEmpty()) {
           dataFilesWithoutDeletes_.add(fileDesc.first);
         } else {
           dataFilesWithDeletes_.add(fileDesc.first);
           for (DeleteFile delFile : fileScanTask.deletes()) {
-            Pair<IcebergFileDescriptor, Boolean> delFileDesc = getFileDescriptor(delFile);
+            Pair<IcebergFileDescriptor, Boolean> delFileDesc =
+                getFileDescriptor(delFile, fileStore);
             if (!delFileDesc.second) ++dataFilesCacheMisses;
             if (delFile.content() == FileContent.EQUALITY_DELETES) {
               addEqualityDeletesAndIds(delFileDesc.first);
@@ -789,10 +798,10 @@ public class IcebergScanPlanner {
    * Returns an IcebergFileDescriptor and an indicator whether it was found in the cache.
    * True for cache hit and false for cache miss.
    */
-  private Pair<IcebergFileDescriptor, Boolean> getFileDescriptor(ContentFile<?> cf)
+  private Pair<IcebergFileDescriptor, Boolean> getFileDescriptor(ContentFile<?> cf,
+      IcebergContentFileStore fileStore)
       throws ImpalaRuntimeException {
     String pathHash = IcebergUtil.getFilePathHash(cf);
-    IcebergContentFileStore fileStore = getIceTable().getContentFileStore();
 
     IcebergFileDescriptor iceFileDesc = cf.content() == FileContent.DATA ?
         fileStore.getDataFileDescriptor(pathHash) :
@@ -832,10 +841,28 @@ public class IcebergScanPlanner {
 
     Preconditions.checkNotNull(hdfsFileDesc);
 
+    Integer partitionId = 0;
+
+    TIcebergPartition partition =
+        IcebergUtil.createIcebergPartitionInfo(getIceTable().getIcebergApiTable(), cf);
+    Map<TIcebergPartition, Integer> partitions = fileStore.getPartitionMap();
+    partitionId = partitions.get(partition);
+    // If we do not find the partition among the current partitions cached by catalog, try
+    // looking it up among the old descriptors' partitions.
+    if (partitionId == null) {
+      synchronized (fileStore) {
+        partitionId = fileStore.getOldPartition(partition);
+        if (partitionId == null) {
+          partitionId = partitions.size() + fileStore.getOldPartitionsSize();
+          fileStore.addOldPartition(partition, partitionId);
+        }
+      }
+    }
+
     // Add file descriptor to the cache.
     iceFileDesc = IcebergFileDescriptor.cloneWithFileMetadata(
-        hdfsFileDesc,
-        IcebergUtil.createIcebergMetadata(getIceTable().getIcebergApiTable(), cf));
+        hdfsFileDesc, IcebergUtil.createIcebergMetadata(
+            getIceTable().getIcebergApiTable(), cf, partitionId));
     fileStore.addOldFileDescriptor(pathHash, iceFileDesc);
 
     return new Pair<>(iceFileDesc, false);

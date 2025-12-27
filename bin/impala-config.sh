@@ -81,13 +81,13 @@ export USE_AVRO_CPP=${USE_AVRO_CPP:=false}
 # moving to a different build of the toolchain, e.g. when a version is bumped or a
 # compile option is changed. The build id can be found in the output of the toolchain
 # build jobs, it is constructed from the build number and toolchain git hash prefix.
-export IMPALA_TOOLCHAIN_BUILD_ID_AARCH64=108-a38e3142e7
-export IMPALA_TOOLCHAIN_BUILD_ID_X86_64=541-a38e3142e7
+export IMPALA_TOOLCHAIN_BUILD_ID_AARCH64=159-1fade8203e
+export IMPALA_TOOLCHAIN_BUILD_ID_X86_64=612-1fade8203e
 export IMPALA_TOOLCHAIN_REPO=\
 ${IMPALA_TOOLCHAIN_REPO:-https://github.com/cloudera/native-toolchain.git}
 export IMPALA_TOOLCHAIN_BRANCH=${IMPALA_TOOLCHAIN_BRANCH:-master}
 export IMPALA_TOOLCHAIN_COMMIT_HASH=\
-${IMPALA_TOOLCHAIN_COMMIT_HASH-a38e3142e70ce74cdf18c3527ece27835adaa58f}
+${IMPALA_TOOLCHAIN_COMMIT_HASH-1fade8203e3df234dc5bab35cd32ff1f40d1db17}
 # Compare the build ref in build IDs by removing everything up-to-and-including the
 # first hyphen.
 if [ "${IMPALA_TOOLCHAIN_BUILD_ID_AARCH64#*-}" \
@@ -115,11 +115,11 @@ else
   export IMPALA_AVRO_VERSION=1.7.4-p5
 fi
 unset IMPALA_AVRO_URL
-export IMPALA_BINUTILS_VERSION=2.35.1
+export IMPALA_BINUTILS_VERSION=2.42
 unset IMPALA_BINUTILS_URL
 export IMPALA_BOOST_VERSION=1.74.0-p1
 unset IMPALA_BOOST_URL
-export IMPALA_BREAKPAD_VERSION=e09741c609dcd5f5274d40182c5e2cc9a002d5ba-p2
+export IMPALA_BREAKPAD_VERSION=e09741c609dcd5f5274d40182c5e2cc9a002d5ba-p3
 unset IMPALA_BREAKPAD_URL
 export IMPALA_BZIP2_VERSION=1.0.8-p2
 unset IMPALA_BZIP2_URL
@@ -137,7 +137,7 @@ export IMPALA_FLATBUFFERS_VERSION=1.9.0-p1
 unset IMPALA_FLATBUFFERS_URL
 export IMPALA_GCC_VERSION=10.4.0
 unset IMPALA_GCC_URL
-export IMPALA_GDB_VERSION=12.1
+export IMPALA_GDB_VERSION=12.1-p1
 unset IMPALA_GDB_URL
 export IMPALA_GFLAGS_VERSION=2.2.0-p2
 unset IMPALA_GFLAGS_URL
@@ -179,7 +179,7 @@ export IMPALA_ZSTD_VERSION=1.5.2
 unset IMPALA_ZSTD_URL
 export IMPALA_OPENLDAP_VERSION=2.4.47
 unset IMPALA_OPENLDAP_URL
-export IMPALA_ORC_VERSION=1.7.9-p10
+export IMPALA_ORC_VERSION=1.7.9-p11
 unset IMPALA_ORC_URL
 export IMPALA_PROTOBUF_VERSION=3.14.0
 unset IMPALA_PROTOBUF_URL
@@ -207,6 +207,8 @@ export IMPALA_TPC_H_VERSION=2.17.0
 unset IMPALA_TPC_H_URL
 export IMPALA_ZLIB_VERSION=1.3.1
 unset IMPALA_ZLIB_URL
+export IMPALA_ARROW_VERSION=15.0.0
+unset IMPALA_ARROW_URL
 export IMPALA_CLOUDFLAREZLIB_VERSION=7aa510344e
 unset IMPALA_CLOUDFLAREZLIB_URL
 export IMPALA_CALLONCEHACK_VERSION=1.0.0
@@ -215,14 +217,15 @@ if [[ $ARCH_NAME == 'aarch64' ]]; then
   export IMPALA_HADOOP_CLIENT_VERSION=3.3.6-p1
   unset IMPALA_HADOOP_CLIENT_URL
 fi
-export IMPALA_MOLD_VERSION=2.4.1
+export IMPALA_MOLD_VERSION=2.40.4
 unset IMPALA_MOLD_URL
 
 # Impala JDBC driver for testing.
 export IMPALA_SIMBA_JDBC_DRIVER_VERSION=42-2.6.32.1041
 
 # Find system python versions for testing
-export IMPALA_SYSTEM_PYTHON2="${IMPALA_SYSTEM_PYTHON2_OVERRIDE-$(command -v python2)}"
+# IMPALA-14606: Stop building impala_python (Python 2) by default.
+export IMPALA_SYSTEM_PYTHON2="${IMPALA_SYSTEM_PYTHON2_OVERRIDE-}"
 export IMPALA_SYSTEM_PYTHON3="${IMPALA_SYSTEM_PYTHON3_OVERRIDE-$(command -v python3)}"
 
 # Additional Python versions to use when building the impala-shell prebuilt tarball
@@ -240,51 +243,52 @@ fi
 : ${IMPALA_TOOLCHAIN_HOST:=native-toolchain.s3.amazonaws.com}
 export IMPALA_TOOLCHAIN_HOST
 
-export CDP_BUILD_NUMBER=66846208
+export CDP_BUILD_NUMBER=71942734
 export CDP_MAVEN_REPOSITORY=\
 "https://${IMPALA_TOOLCHAIN_HOST}/build/cdp_components/${CDP_BUILD_NUMBER}/maven"
-export CDP_AVRO_JAVA_VERSION=1.11.1.7.3.1.500-30
-export CDP_HADOOP_VERSION=3.1.1.7.3.1.500-30
-export CDP_HBASE_VERSION=2.4.17.7.3.1.500-30
-export CDP_HIVE_VERSION=3.1.3000.7.3.1.500-30
-export CDP_ICEBERG_VERSION=1.3.1.7.3.1.500-30
-export CDP_KNOX_VERSION=2.0.0.7.3.1.500-30
-export CDP_OZONE_VERSION=1.4.0.7.3.1.500-30
-export CDP_PARQUET_VERSION=1.12.3.7.3.1.500-30
-export CDP_RANGER_VERSION=2.4.0.7.3.1.500-30
-export CDP_TEZ_VERSION=0.9.1.7.3.1.500-30
+export CDP_AVRO_JAVA_VERSION=1.11.1.7.3.1.500-182
+export CDP_HADOOP_VERSION=3.1.1.7.3.1.500-182
+export CDP_HBASE_VERSION=2.4.17.7.3.1.500-182
+export CDP_HIVE_VERSION=3.1.3000.7.3.1.500-182
+export CDP_ICEBERG_VERSION=1.5.2.7.3.1.500-182
+export CDP_KNOX_VERSION=2.0.0.7.3.1.500-182
+export CDP_ORC_JAVA_VERSION=1.8.3.7.3.1.500-182
+export CDP_OZONE_VERSION=1.4.0.7.3.1.500-182
+export CDP_PARQUET_VERSION=1.12.3.7.3.1.500-182
+export CDP_RANGER_VERSION=2.4.0.7.3.1.500-182
+export CDP_TEZ_VERSION=0.9.1.7.3.1.500-182
 
 # Ref: https://infra.apache.org/release-download-pages.html#closer
 : ${APACHE_MIRROR:="https://www.apache.org/dyn/closer.cgi"}
 export APACHE_MIRROR
-export APACHE_AVRO_JAVA_VERSION=1.8.2
+export APACHE_AVRO_JAVA_VERSION=1.11.1
 export APACHE_HADOOP_VERSION=3.4.1
 export APACHE_HBASE_VERSION=2.6.0
-export APACHE_ICEBERG_VERSION=1.4.3
-export APACHE_KNOX_VERSION=1.6.1
+export APACHE_ICEBERG_VERSION=1.5.2
+export APACHE_KNOX_VERSION=2.0.0
+export APACHE_ORC_JAVA_VERSION=1.8.3
 export APACHE_PARQUET_VERSION=1.12.3
 export APACHE_RANGER_VERSION=2.4.0
 export APACHE_TEZ_VERSION=0.10.2
-export APACHE_HIVE_VERSION=3.1.3
-export APACHE_HIVE_STORAGE_API_VERSION=2.7.0
+export APACHE_HIVE_3_VERSION=3.1.3
+export APACHE_HIVE_3_STORAGE_API_VERSION=2.7.0
 export APACHE_OZONE_VERSION=1.4.0
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
 # other branches to override them in impala-config-branch.sh for cleaner patches.
-export IMPALA_BOUNCY_CASTLE_VERSION=1.78
+export IMPALA_BOUNCY_CASTLE_VERSION=1.79
 export IMPALA_COMMONS_LANG3_VERSION=3.18.0
 export IMPALA_COS_VERSION=3.1.0-8.0.8
 export IMPALA_DERBY_VERSION=10.14.2.0
 export IMPALA_GUAVA_VERSION=32.1.2-jre
 export IMPALA_HUDI_VERSION=0.5.0-incubating
 export IMPALA_HTTP_CORE_VERSION=4.4.14
-export IMPALA_JACKSON_VERSION=2.15.3
+export IMPALA_JACKSON_VERSION=2.18.1
 export IMPALA_JACKSON_DATABIND_VERSION=2.15.3
 export IMPALA_JSON_SMART_VERSION=2.4.11
 export IMPALA_JUNIT_VERSION=4.12
 export IMPALA_KITE_VERSION=1.1.0
 export IMPALA_LOG4J2_VERSION=2.18.0
-export IMPALA_ORC_JAVA_VERSION=1.7.6
 export IMPALA_PAC4J_VERSION=4.5.5
 export IMPALA_RELOAD4j_VERSION=1.2.22
 export IMPALA_SLF4J_VERSION=2.0.13
@@ -292,11 +296,11 @@ export IMPALA_SPRINGFRAMEWORK_VERSION=5.3.39
 export IMPALA_XMLSEC_VERSION=2.2.6
 export IMPALA_VELOCITY_ENGINE_CORE_VERSION=2.4.1
 export IMPALA_OBS_VERSION=3.1.1-hw-42
-export IMPALA_DBCP2_VERSION=2.9.0
+export IMPALA_DBCP2_VERSION=2.12.0
 export IMPALA_DROPWIZARD_METRICS_VERSION=4.2.26
 export IMPALA_AIRCOMPRESSOR_VERSION=0.27
 export IMPALA_DATASKETCHES_VERSION=6.0.0
-export IMPALA_PAIMON_VERSION=1.1.1
+export IMPALA_PAIMON_VERSION=1.3.1
 # When Impala is building docker images on Redhat-based distributions,
 # it is useful to be able to customize the base image. Some users will
 # want to use open source / free distributions like Centos/Rocky/Alma/etc.
@@ -377,8 +381,8 @@ export CDP_ICEBERG_URL=${CDP_ICEBERG_URL-}
 export CDP_RANGER_URL=${CDP_RANGER_URL-}
 export CDP_TEZ_URL=${CDP_TEZ_URL-}
 
-export APACHE_HIVE_URL=${APACHE_HIVE_URL-}
-export APACHE_HIVE_SOURCE_URL=${APACHE_HIVE_SOURCE_URL-}
+export APACHE_HIVE_3_URL=${APACHE_HIVE_3_URL-}
+export APACHE_HIVE_3_SOURCE_URL=${APACHE_HIVE_3_SOURCE_URL-}
 export APACHE_OZONE_URL=${APACHE_OZONE_URL-}
 
 export CDP_COMPONENTS_HOME="$IMPALA_TOOLCHAIN/cdp_components-$CDP_BUILD_NUMBER"
@@ -389,13 +393,14 @@ if ${USE_APACHE_COMPONENTS:=false}; then
   export IMPALA_HBASE_VERSION=${APACHE_HBASE_VERSION}
   export IMPALA_ICEBERG_VERSION=${APACHE_ICEBERG_VERSION}
   export IMPALA_KNOX_VERSION=${APACHE_KNOX_VERSION}
+  export IMPALA_ORC_JAVA_VERSION=${APACHE_ORC_JAVA_VERSION}
   export IMPALA_OZONE_VERSION=${APACHE_OZONE_VERSION}
   export IMPALA_PARQUET_VERSION=${APACHE_PARQUET_VERSION}
   export IMPALA_RANGER_VERSION=${RANGER_VERSION_OVERRIDE:-"$APACHE_RANGER_VERSION"}
   export IMPALA_TEZ_VERSION=${APACHE_TEZ_VERSION}
   export USE_APACHE_HADOOP=true
   export USE_APACHE_HBASE=true
-  export USE_APACHE_HIVE=true
+  export USE_APACHE_HIVE_3=true
   export USE_APACHE_TEZ=true
   export USE_APACHE_RANGER=true
   export USE_APACHE_OZONE=true
@@ -408,6 +413,7 @@ else
   export IMPALA_ICEBERG_VERSION=${CDP_ICEBERG_VERSION}
   export IMPALA_ICEBERG_URL=${CDP_ICEBERG_URL-}
   export IMPALA_KNOX_VERSION=${CDP_KNOX_VERSION}
+  export IMPALA_ORC_JAVA_VERSION=${CDP_ORC_JAVA_VERSION}
   export IMPALA_OZONE_VERSION=${CDP_OZONE_VERSION}
   export IMPALA_PARQUET_VERSION=${CDP_PARQUET_VERSION}
   export IMPALA_RANGER_VERSION=${RANGER_VERSION_OVERRIDE:-"$CDP_RANGER_VERSION"}
@@ -416,7 +422,7 @@ else
   export IMPALA_TEZ_URL=${CDP_TEZ_URL-}
   export USE_APACHE_HADOOP=${USE_APACHE_HADOOP:=false}
   export USE_APACHE_HBASE=${USE_APACHE_HBASE:=false}
-  export USE_APACHE_HIVE=${USE_APACHE_HIVE:=false}
+  export USE_APACHE_HIVE_3=${USE_APACHE_HIVE_3:=false}
   export USE_APACHE_TEZ=${USE_APACHE_TEZ:=false}
   export USE_APACHE_RANGER=${USE_APACHE_RANGER:=false}
   export USE_APACHE_OZONE=${USE_APACHE_OZONE:=false}
@@ -430,18 +436,18 @@ else
   export HADOOP_HOME="$CDP_COMPONENTS_HOME/hadoop-${IMPALA_HADOOP_VERSION}"
 fi
 
-if $USE_APACHE_HIVE; then
-  # When USE_APACHE_HIVE is set we use the apache hive version to build as well as deploy
-  # in the minicluster
-  export IMPALA_HIVE_DIST_TYPE="apache-hive"
-  export IMPALA_HIVE_VERSION=${APACHE_HIVE_VERSION}
-  export IMPALA_HIVE_URL=${APACHE_HIVE_URL-}
-  export IMPALA_HIVE_SOURCE_URL=${APACHE_HIVE_SOURCE_URL-}
-  export IMPALA_HIVE_STORAGE_API_VERSION=${APACHE_HIVE_STORAGE_API_VERSION}
+if $USE_APACHE_HIVE_3; then
+  # When USE_APACHE_HIVE_3 is set we use the apache hive version to build as well as
+  # deploy in the minicluster
+  export IMPALA_HIVE_DIST_TYPE="apache-hive-3"
+  export IMPALA_HIVE_VERSION=${APACHE_HIVE_3_VERSION}
+  export IMPALA_HIVE_URL=${APACHE_HIVE_3_URL-}
+  export IMPALA_HIVE_SOURCE_URL=${APACHE_HIVE_3_SOURCE_URL-}
+  export IMPALA_HIVE_STORAGE_API_VERSION=${APACHE_HIVE_3_STORAGE_API_VERSION}
 else
-  # CDP hive version is used to build and deploy in minicluster when USE_APACHE_HIVE is
+  # CDP hive version is used to build and deploy in minicluster when USE_APACHE_HIVE_* is
   # false
-  export IMPALA_HIVE_DIST_TYPE="hive"
+  export IMPALA_HIVE_DIST_TYPE="hive-3"
   export IMPALA_HIVE_VERSION=${HIVE_VERSION_OVERRIDE:-"$CDP_HIVE_VERSION"}
   export IMPALA_HIVE_URL=${CDP_HIVE_URL-}
   export IMPALA_HIVE_SOURCE_URL=${CDP_HIVE_SOURCE_URL-}
@@ -459,7 +465,7 @@ fi
 # infra/python/deps/requirements.txt.
 export IMPALA_THRIFT_CPP_VERSION=0.16.0-p7
 unset IMPALA_THRIFT_CPP_URL
-if $USE_APACHE_HIVE; then
+if $USE_APACHE_HIVE_3; then
   # Apache Hive 3 clients can't run on thrift versions >= 0.14 (IMPALA-11801)
   export IMPALA_THRIFT_POM_VERSION=0.11.0
   export IMPALA_THRIFT_JAVA_VERSION=${IMPALA_THRIFT_POM_VERSION}-p5
@@ -498,27 +504,26 @@ fi
 # the JDK version as part of bin/impala-config-local.sh
 
 # Decision tree:
-# if IMPALA_JAVA_HOME_OVERRIDE is set, respect it
-# else if IMPALA_JDK_VERSION == system, look for system JDK
-# else if IMPALA_JDK_VERSION == 8+, look for Java 8+ JDK
+# if IMPALA_JDK_VERSION is set, look for that version based on known locations
+# else if JAVA_HOME is set, use it
+# else look for system JDK
 
-# Initialize IMPALA_JDK_VERSION and set package variables for Docker builds
+# Set package variables for Docker builds and OS-specific detection.
 . "$IMPALA_HOME/bin/impala-config-java.sh"
 
-if [[ -n "${IMPALA_JAVA_HOME_OVERRIDE-}" ]]; then
-  IMPALA_JDK_VERSION=override
-fi
-
-DETECTED_JAVA_HOME=Invalid
-if [[ "${IMPALA_JDK_VERSION}" == "system" ]]; then
-  # Try to detect the system's JAVA_HOME
-  # If javac exists, then the system has a Java SDK (JRE does not have javac).
-  # Follow the symbolic links and use this to determine the system's JAVA_HOME.
-  DETECTED_JAVA_HOME="/usr/java/default"
-  if [ -n "$(which javac)" ]; then
-    DETECTED_JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
+DETECTED_JAVA_HOME=${JAVA_HOME:-}
+if [[ -z "${IMPALA_JDK_VERSION:-}" ]]; then
+  # IMPALA_JDK_VERSION is empty or unset. Use JAVA_HOME or detect system default.
+  if [[ -z "${DETECTED_JAVA_HOME:-}" ]]; then
+    # Try to detect the system's JAVA_HOME
+    # If javac exists, then the system has a Java SDK (JRE does not have javac).
+    # Follow the symbolic links and use this to determine the system's JAVA_HOME.
+    DETECTED_JAVA_HOME="/usr/java/default"
+    if [ -n "$(which javac)" ]; then
+      DETECTED_JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
+    fi
   fi
-elif [[ "${IMPALA_JDK_VERSION}" != "override" ]]; then
+else
   # Now, we are looking for a specific version, and that will depend on the
   # distribution. Currently, this is implemented for Redhat and Ubuntu.
   DISTRIBUTION=Unknown
@@ -534,45 +539,50 @@ elif [[ "${IMPALA_JDK_VERSION}" != "override" ]]; then
   fi
   if [[ "${DISTRIBUTION}" == "Unknown" ]]; then
     echo "ERROR: auto-detection of JAVA_HOME only supported for Ubuntu and RedHat."
-    echo "Use IMPALA_JAVA_HOME_OVERRIDE to configure JAVA_HOME."
+    echo "Set JAVA_HOME to use a specific location."
     return 1
   fi
 
   JVMS_PATH=/usr/lib/jvm
   if [[ "${DISTRIBUTION}" == "Ubuntu" ]]; then
-    JAVA_PACKAGE_NAME="java-${IMPALA_JDK_VERSION}-openjdk-${UBUNTU_PACKAGE_ARCH}"
+    JAVA_PACKAGE_NAME="java-${UBUNTU_JAVA_VERSION}-openjdk-${UBUNTU_PACKAGE_ARCH}"
     DETECTED_JAVA_HOME="${JVMS_PATH}/${JAVA_PACKAGE_NAME}"
   elif [[ "${DISTRIBUTION}" == "Redhat" ]]; then
-    if [[ "${IMPALA_JDK_VERSION}" == "8" ]]; then
-      DETECTED_JAVA_HOME="${JVMS_PATH}/java-1.8.0"
-    else
-      DETECTED_JAVA_HOME="${JVMS_PATH}/java-${IMPALA_JDK_VERSION}"
-    fi
+    DETECTED_JAVA_HOME="${JVMS_PATH}/java-${REDHAT_JAVA_VERSION}"
   fi
 
   if [[ ! -d "${DETECTED_JAVA_HOME}" ]]; then
     echo "ERROR: Could not detect Java ${IMPALA_JDK_VERSION}."\
-         "${DETECTED_JAVA_HOME} is not a directory."
+        "${DETECTED_JAVA_HOME} is not a directory."
     return 1
   fi
 fi
 
-# Prefer the JAVA_HOME set in the environment, but use the system's JAVA_HOME otherwise
-export JAVA_HOME="${IMPALA_JAVA_HOME_OVERRIDE:-${DETECTED_JAVA_HOME}}"
-if [ ! -d "$JAVA_HOME" ]; then
+# Update JAVA_HOME to the detected JAVA_HOME if it exists.
+if [ ! -d "${DETECTED_JAVA_HOME}" ]; then
   echo "JAVA_HOME must be set to the location of your JDK!"
   return 1
 fi
+export JAVA_HOME="${DETECTED_JAVA_HOME}"
 export JAVA="$JAVA_HOME/bin/java"
 if [[ ! -e "$JAVA" ]]; then
   echo "Could not find java binary at $JAVA" >&2
   return 1
+fi
+# Target the Java version matching the JDK.
+export IMPALA_JAVA_TARGET=$("$JAVA" -version 2>&1 | awk -F'[\".]' '/version/ {print $2}')
+if [[ $IMPALA_JAVA_TARGET -eq 1 ]]; then
+  # Capture x from 1.x, i.e. Java 1.8 -> 8.
+  IMPALA_JAVA_TARGET=$("$JAVA" -version 2>&1 | awk -F'[\".]' '/version/ {print $3}')
 fi
 
 # Java libraries required by executables and java tests.
 export LIB_JAVA=$(find "${JAVA_HOME}/" -name libjava.so | head -1)
 export LIB_JSIG=$(find "${JAVA_HOME}/" -name libjsig.so | head -1)
 export LIB_JVM=$(find "${JAVA_HOME}/" -name libjvm.so  | head -1)
+
+# Default to make, but allow overriding to e.g. ninja.
+export IMPALA_MAKE_CMD=${IMPALA_MAKE_CMD:-make}
 
 #########################################################################################
 # Below here are variables that can be overridden by impala-config-*.sh and environment #
@@ -601,6 +611,10 @@ export USE_SYSTEM_GCC=${USE_SYSTEM_GCC-0}
 # Note: This is validated in the CMake code.
 # TODO: Add support for lld as well
 export IMPALA_LINKER=${IMPALA_LINKER-gold}
+
+# Limit mold to a single job to avoid excessive memory consumption while fully utilizing
+# available CPUs.
+export MOLD_JOBS=${IMPALA_MOLD_JOBS-1}
 
 # Override the default compiler by setting a path to the new compiler. The default
 # compiler depends on USE_SYSTEM_GCC and IMPALA_GCC_VERSION. The intended use case
@@ -704,7 +718,7 @@ DEFAULT_NODES_DIR="$IMPALA_HOME/testdata/cluster/cdh$CDH_MAJOR_VERSION$UNIQUE_FS
 export IMPALA_CLUSTER_NODES_DIR="${IMPALA_CLUSTER_NODES_DIR-$DEFAULT_NODES_DIR}"
 
 ESCAPED_DB_UID=$(sed "s/[^0-9a-zA-Z]/_/g" <<< "$UNIQUE_FS_LABEL$IMPALA_HOME")
-if $USE_APACHE_HIVE; then
+if $USE_APACHE_HIVE_3; then
   export HIVE_HOME="$APACHE_COMPONENTS_HOME/apache-hive-${IMPALA_HIVE_VERSION}-bin"
   export HIVE_SRC_DIR="$APACHE_COMPONENTS_HOME/apache-hive-${IMPALA_HIVE_VERSION}-src"
   # if apache hive is being used change the metastore db name, so we don't have to
@@ -1003,7 +1017,9 @@ fi
 # Reduce the concurrency for local tests to half the number of cores in the system.
 export NUM_CONCURRENT_TESTS="${NUM_CONCURRENT_TESTS-$((CORES / 2))}"
 
-export KUDU_MASTER_HOSTS="${KUDU_MASTER_HOSTS:-${INTERNAL_LISTEN_HOST}}"
+# IMPALA-14476: Temporarily fix KUDU_MASTER_HOSTS to ipv4 address
+# export KUDU_MASTER_HOSTS="${KUDU_MASTER_HOSTS:-${INTERNAL_LISTEN_HOST}}"
+export KUDU_MASTER_HOSTS="${KUDU_MASTER_HOSTS:-127.0.0.1}"
 export KUDU_MASTER_PORT="${KUDU_MASTER_PORT:-7051}"
 export KUDU_MASTER_WEBUI_PORT="${KUDU_MASTER_WEBUI_PORT:-8051}"
 
@@ -1015,7 +1031,7 @@ export IMPALA_DATASET_DIR="$IMPALA_HOME/testdata/datasets"
 export IMPALA_AUX_DATASET_DIR="$IMPALA_AUX_TEST_HOME/testdata/datasets"
 export IMPALA_COMMON_DIR="$IMPALA_HOME/common"
 export PATH="$IMPALA_TOOLCHAIN_PACKAGES_HOME/gdb-$IMPALA_GDB_VERSION/bin:$PATH"
-export PATH="$IMPALA_TOOLCHAIN_PACKAGES_HOME/cmake-$IMPALA_CMAKE_VERSION/bin/:$PATH"
+export PATH="$IMPALA_TOOLCHAIN_PACKAGES_HOME/cmake-$IMPALA_CMAKE_VERSION/bin:$PATH"
 export PATH="$IMPALA_HOME/bin:$PATH"
 
 export HADOOP_CONF_DIR="$IMPALA_FE_DIR/src/test/resources"
@@ -1075,7 +1091,7 @@ export HIVE_AUX_JARS_PATH="$POSTGRES_JDBC_DRIVER"
 # Add the jar of iceberg-hive-runtime to have HiveIcebergStorageHandler.
 # Only needed by Apache Hive3 since CDP Hive3 has the jar of hive-iceberg-handler in its
 # lib folder.
-if $USE_APACHE_HIVE; then
+if $USE_APACHE_HIVE_3; then
   export HIVE_AUX_JARS_PATH="$HIVE_AUX_JARS_PATH:\
 $IMPALA_HOME/fe/target/dependency/iceberg-hive-runtime-${IMPALA_ICEBERG_VERSION}.jar"
 fi
@@ -1118,7 +1134,7 @@ fi
 # overall build type) and does not apply when using a local Kudu build.
 export USE_KUDU_DEBUG_BUILD=${USE_KUDU_DEBUG_BUILD-false}
 
-export IMPALA_KUDU_VERSION=${IMPALA_KUDU_VERSION-"e742f86f6d"}
+export IMPALA_KUDU_VERSION=${IMPALA_KUDU_VERSION-"879a8f9e2"}
 export IMPALA_KUDU_HOME=${IMPALA_TOOLCHAIN_PACKAGES_HOME}/kudu-$IMPALA_KUDU_VERSION
 export IMPALA_KUDU_JAVA_HOME=\
 ${IMPALA_TOOLCHAIN_PACKAGES_HOME}/kudu-${IMPALA_KUDU_VERSION}/java
@@ -1157,16 +1173,31 @@ else
   CGROUP_MEM_LIMIT=8589934591 # max int64 bytes in GB
 fi
 AVAILABLE_MEM=$((AVAILABLE_MEM > $CGROUP_MEM_LIMIT ? $CGROUP_MEM_LIMIT : $AVAILABLE_MEM))
-BOUNDED_CONCURRENCY=$((AVAILABLE_MEM / 2))
-if [[ $AVAILABLE_MEM -lt 2 ]]; then
+if [[ $AVAILABLE_MEM -lt 5 ]]; then
   echo "Insufficient memory ($AVAILABLE_MEM GB) to build Impala"
   exit 1
-elif [[ $BOUNDED_CONCURRENCY -lt $CORES ]]; then
+fi
+BOUNDED_CONCURRENCY=$((AVAILABLE_MEM / 2))
+if [[ $BOUNDED_CONCURRENCY -lt $CORES ]]; then
   echo "Bounding concurrency for available memory ($AVAILABLE_MEM GB)"
 else
   BOUNDED_CONCURRENCY=$CORES
 fi
-export IMPALA_BUILD_THREADS=${IMPALA_BUILD_THREADS-"${BOUNDED_CONCURRENCY}"}
+export IMPALA_BUILD_THREADS=${IMPALA_BUILD_THREADS:-"${BOUNDED_CONCURRENCY}"}
+# Limit number of links; only works with ninja builds.
+# Determines number of concurrent links based on expected memory use.
+if [[ "$IMPALA_MINIMAL_DEBUG_INFO" == "true" ||
+      "$IMPALA_SPLIT_DEBUG_INFO"   == "true" ]]; then
+  MEM_PER_LINK=2
+else
+  MEM_PER_LINK=5
+fi
+BOUNDED_LINKS=$((AVAILABLE_MEM / MEM_PER_LINK))
+if [[ $BOUNDED_LINKS -gt $IMPALA_BUILD_THREADS ]]; then
+  # Avoid regressing behavior if IMPALA_BUILD_THREADS is already set to a low value.
+  BOUNDED_LINKS=${IMPALA_BUILD_THREADS}
+fi
+export IMPALA_LINK_THREADS=${IMPALA_LINK_THREADS:-"${BOUNDED_LINKS}"}
 
 # Additional flags to pass to make or ninja.
 export IMPALA_MAKE_FLAGS=${IMPALA_MAKE_FLAGS-}
@@ -1218,6 +1249,7 @@ echo "THRIFT_PY_HOME          = $THRIFT_PY_HOME"
 echo "CLASSPATH               = $CLASSPATH"
 echo "LIBHDFS_OPTS            = $LIBHDFS_OPTS"
 echo "JAVA_HOME               = $JAVA_HOME"
+echo "IMPALA_JAVA_TARGET      = $IMPALA_JAVA_TARGET"
 echo "POSTGRES_JDBC_DRIVER    = $POSTGRES_JDBC_DRIVER"
 echo "IMPALA_TOOLCHAIN        = $IMPALA_TOOLCHAIN"
 echo "IMPALA_TOOLCHAIN_PACKAGES_HOME = $IMPALA_TOOLCHAIN_PACKAGES_HOME"
@@ -1237,6 +1269,7 @@ echo "IMPALA_PARQUET_VERSION  = $IMPALA_PARQUET_VERSION"
 echo "IMPALA_HIVE_VERSION     = $IMPALA_HIVE_VERSION"
 echo "IMPALA_TEZ_VERSION      = $IMPALA_TEZ_VERSION"
 echo "IMPALA_HBASE_VERSION    = $IMPALA_HBASE_VERSION"
+echo "IMPALA_ORC_JAVA_VERSION = $IMPALA_ORC_JAVA_VERSION"
 echo "IMPALA_OZONE_VERSION    = $IMPALA_OZONE_VERSION"
 echo "IMPALA_HUDI_VERSION     = $IMPALA_HUDI_VERSION"
 echo "IMPALA_KUDU_VERSION     = $IMPALA_KUDU_VERSION"
@@ -1248,6 +1281,7 @@ echo "IMPALA_OBS_VERSION      = $IMPALA_OBS_VERSION"
 echo "IMPALA_SYSTEM_PYTHON2   = $IMPALA_SYSTEM_PYTHON2"
 echo "IMPALA_SYSTEM_PYTHON3   = $IMPALA_SYSTEM_PYTHON3"
 echo "IMPALA_BUILD_THREADS    = $IMPALA_BUILD_THREADS"
+echo "IMPALA_LINK_THREADS     = $IMPALA_LINK_THREADS"
 echo "NUM_CONCURRENT_TESTS    = $NUM_CONCURRENT_TESTS"
 echo "USE_CUSTOM_IMPALA_BASE_IMAGE = $USE_CUSTOM_IMPALA_BASE_IMAGE"
 echo "IMPALA_CUSTOM_DOCKER_BASE    = $IMPALA_CUSTOM_DOCKER_BASE"
@@ -1277,13 +1311,12 @@ else
 fi
 
 # Check for minimum required Java version
-# Only issue Java version warning when running Java 7.
-if $JAVA -version 2>&1 | grep -q 'java version "1.7'; then
+if [[ $IMPALA_JAVA_TARGET -le 7 ]]; then
   cat << EOF
 
-WARNING: Your development environment is configured for Hadoop 3 and Java 7. Hadoop 3
-requires at least Java 8. Your JAVA binary currently points to $JAVA
-and reports the following version:
+WARNING: Your development environment is configured for Hadoop 3 and Java
+$IMPALA_JAVA_TARGET. Hadoop 3 requires at least Java 8. Your JAVA binary
+currently points to $JAVA and reports the following version:
 
 EOF
   $JAVA -version

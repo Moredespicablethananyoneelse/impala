@@ -164,6 +164,9 @@ public class IcebergTable extends Table implements FeIcebergTable {
   // Internal Iceberg table property that specifies the UUID of the table.
   public static final String UUID = "uuid";
 
+  // Internal Iceberg table property that specifies the table format version.
+  public static final String FORMAT_VERSION = "format-version";
+
   // Parquet compression codec and compression level table properties.
   public static final String PARQUET_COMPRESSION_CODEC =
       "write.parquet.compression-codec";
@@ -526,11 +529,12 @@ public class IcebergTable extends Table implements FeIcebergTable {
           icebergApiTable_,
           fileStore_ == null ? Collections.emptyList() : fileStore_.getAllFiles(),
           getHostIndex(), Preconditions.checkNotNull(icebergFiles),
+          fileStore_ == null ? Collections.emptyList() : fileStore_.getPartitionList(),
           Utils.requiresDataFilesInTableLocation(this));
       loader.load();
       catalogTimeline.markEvent("Loaded Iceberg file descriptors");
-      fileStore_ = new IcebergContentFileStore(
-          icebergApiTable_, loader.getLoadedIcebergFds(), icebergFiles);
+      fileStore_ = new IcebergContentFileStore(icebergApiTable_,
+          loader.getLoadedIcebergFds(), icebergFiles, loader.getIcebergPartitions());
       partitionStats_ = Utils.loadPartitionStats(this, icebergFiles);
 
       setAvroSchema(msClient, msTable_, fileStore_, catalogTimeline);

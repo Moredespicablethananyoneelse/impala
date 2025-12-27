@@ -252,6 +252,14 @@ public class TupleCacheTest extends PlannerTestBase {
     verifyCacheIneligible("select id from functional_kudu.alltypes");
     verifyCacheIneligible("select id from functional_hbase.alltypes");
 
+    // Caching for Full Hive ACID is not implemented due to complications
+    // with valid write ids. ORC tables are loaded as Full ACID tables.
+    verifyCacheIneligible("select count(*) from functional_orc_def.alltypes");
+    // Hive ACID insert-only tables are eligible
+    verifyAllEligible(
+        "select count(*) from functional_parquet.insert_only_major_and_minor_compacted",
+        /* isDistributedPlan */ false);
+
     // Runtime filter produced by Kudu table is not implemented
     verifyCacheIneligible("select a.id from functional.alltypes a, " +
         "functional_kudu.alltypes b where a.id = b.id");
@@ -469,18 +477,20 @@ public class TupleCacheTest extends PlannerTestBase {
   @Test
   public void testDeterministicScheduling() {
     // Verify that the HdfsScanNode that feeds into a TupleCacheNode uses deterministic
-    // scan range scheduling. When there are more ways for locations to be cache
-    // ineligible, this test will be expanded to cover the case where scan nodes don't
-    // use deterministic scheduling.
+    // scan range scheduling and oldest to newest scheduling. When there are more
+    // ways for locations to be cache ineligible, this test will be expanded to cover the
+    // case where scan nodes don't use deterministic scheduling / oldest to newest.
     List<PlanNode> cacheEligibleNodes =
         getCacheEligibleNodes("select id from functional.alltypes where int_col = 500");
     for (PlanNode node : cacheEligibleNodes) {
-      // The HdfsScanNode for this query will have determinstic scan range assignment set
-      // This test uses mt_dop=0, so the value wouldn't matter for execution, but it
-      // still verifies that it is set properly.
+      // The HdfsScanNode for this query will have determinstic scan range assignment and
+      // oldest to newest scheduling set. This test uses mt_dop=0, so the deterministic
+      // scheduling value wouldn't matter for execution, but it still verifies that it is
+      // set properly.
       if (node instanceof HdfsScanNode) {
         HdfsScanNode hdfsScanNode = (HdfsScanNode) node;
         assertTrue(hdfsScanNode.usesDeterministicScanRangeAssignment());
+        assertTrue(hdfsScanNode.scheduleScanRangesOldestToNewest());
       }
     }
   }

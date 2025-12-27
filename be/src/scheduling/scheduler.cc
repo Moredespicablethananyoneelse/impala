@@ -70,7 +70,7 @@ static const string SCHEDULER_WARNING_KEY("Scheduler Warning");
 static const vector<TPlanNodeType::type> SCAN_NODE_TYPES{TPlanNodeType::HDFS_SCAN_NODE,
     TPlanNodeType::HBASE_SCAN_NODE, TPlanNodeType::DATA_SOURCE_NODE,
     TPlanNodeType::KUDU_SCAN_NODE, TPlanNodeType::ICEBERG_METADATA_SCAN_NODE,
-    TPlanNodeType::SYSTEM_TABLE_SCAN_NODE};
+    TPlanNodeType::SYSTEM_TABLE_SCAN_NODE, TPlanNodeType::PAIMON_SCAN_NODE};
 
 // Consistent scheduling requires picking up to k distinct candidates out of n nodes.
 // Since each iteration can pick a node that it already picked (i.e. it is sampling with
@@ -183,6 +183,69 @@ Status Scheduler::GenerateScanRanges(const vector<TFileSplitGeneratorSpec>& spec
   return Status::OK();
 }
 
+// Comparison function for sorting scan ranges oldest to newest. This needs to return true
+// if scanRange1 is less than scanRange2 and false otherwise.
+static bool ScanRangeOldestToNewestComparator(
+    const TScanRangeLocationList& scanRange1, const TScanRangeLocationList& scanRange2) {
+  DCHECK(scanRange1.scan_range.__isset.hdfs_file_split);
+  const THdfsFileSplit& split1 = scanRange1.scan_range.hdfs_file_split;
+  DCHECK(scanRange2.scan_range.__isset.hdfs_file_split);
+  const THdfsFileSplit& split2 = scanRange2.scan_range.hdfs_file_split;
+  // Multiple files (or multiple splits from the same file) can have the same
+  // modification time, so we need tie-breaking when they are equal.
+  if (split1.mtime != split2.mtime) return split1.mtime < split2.mtime;
+  if (!split1.relative_path.empty() && !split2.relative_path.empty()) {
+    // If both have a relative path set (the common case), compare the partition hash
+    // and relative path
+    if (split1.partition_path_hash != split2.partition_path_hash) {
+      return split1.partition_path_hash < split2.partition_path_hash;
+    }
+    if (split1.relative_path != split2.relative_path) {
+      return split1.relative_path < split2.relative_path;
+    }
+  } else {
+    // If only one has a relative path, sort absolute paths ahead of relative paths.
+    if (split1.relative_path.empty()) {
+      DCHECK(split1.__isset.absolute_path && !split1.absolute_path.empty());
+      return true;
+    }
+    if (split2.relative_path.empty()) {
+      DCHECK(split2.__isset.absolute_path && !split2.absolute_path.empty());
+      return false;
+    }
+    // Both have empty relative paths, so compare the absolute paths (which must be
+    // non-empty)
+    DCHECK(split1.__isset.absolute_path && !split1.absolute_path.empty());
+    DCHECK(split2.__isset.absolute_path && !split2.absolute_path.empty());
+    if (split1.absolute_path != split2.absolute_path) {
+      return split1.absolute_path < split2.absolute_path;
+    }
+  }
+  if (split1.offset != split2.offset) return split1.offset < split2.offset;
+
+  // If we get here, something is wrong. There can't be two scan ranges with the same
+  // filename and offset.
+  DCHECK(false) << "Duplicate scan range when sorting. Split 1: " << split1
+                << " Split 2: " << split2;
+  return false;
+}
+
+#ifndef NDEBUG
+// For debug builds, do additional validation of the ordering produced by the
+// comparator. Specifically, for different a and b, comp(a, b) != comp(b, a).
+// For the scheduling use case, we know that a and b are different.
+static bool ScanRangeOldestToNewestComparatorWithValidation(
+    const TScanRangeLocationList& scanRange1, const TScanRangeLocationList& scanRange2) {
+  bool forwards_result = ScanRangeOldestToNewestComparator(scanRange1, scanRange2);
+  bool backwards_result = ScanRangeOldestToNewestComparator(scanRange2, scanRange1);
+  DCHECK_NE(forwards_result, backwards_result)
+    << "Comparator violates ordering requirements:"
+    << " Comp(" << scanRange1 << ", " << scanRange2 << ") = " << forwards_result
+    << " Comp(" << scanRange2 << ", " << scanRange1 << ") = " << backwards_result;
+  return forwards_result;
+}
+#endif
+
 Status Scheduler::ComputeScanRangeAssignment(
     const ExecutorConfig& executor_config, ScheduleState* state) {
   RuntimeProfile::Counter* total_assignment_timer =
@@ -206,22 +269,43 @@ Status Scheduler::ComputeScanRangeAssignment(
       bool node_random_replica = node.__isset.hdfs_scan_node
           && node.hdfs_scan_node.__isset.random_replica
           && node.hdfs_scan_node.random_replica;
+      bool node_schedule_oldest_to_newest = node.__isset.hdfs_scan_node
+        && node.hdfs_scan_node.__isset.schedule_scanranges_oldest_to_newest
+        && node.hdfs_scan_node.schedule_scanranges_oldest_to_newest;
 
       FragmentScanRangeAssignment* assignment =
           &state->GetFragmentScheduleState(fragment.idx)->scan_range_assignment;
 
-      const vector<TScanRangeLocationList>* locations = nullptr;
+      const vector<TScanRangeLocationList>* locations = &entry.second.concrete_ranges;
       vector<TScanRangeLocationList> expanded_locations;
-      if (entry.second.split_specs.empty()) {
-        // directly use the concrete ranges.
-        locations = &entry.second.concrete_ranges;
-      } else {
-        // union concrete ranges and expanded specs.
+      // Copy the ranges to a separate vector if:
+      // 1. There are split specs to union with the concrete ranges
+      // 2. We're scheduling oldest to newest and need to sort the ranges without
+      //    changing the original vector
+      if (!entry.second.split_specs.empty() || node_schedule_oldest_to_newest) {
+        locations = &expanded_locations;
         expanded_locations.insert(expanded_locations.end(),
             entry.second.concrete_ranges.begin(), entry.second.concrete_ranges.end());
-        RETURN_IF_ERROR(
-            GenerateScanRanges(entry.second.split_specs, &expanded_locations));
-        locations = &expanded_locations;
+        // union concrete ranges and expanded specs
+        if (!entry.second.split_specs.empty()) {
+          RETURN_IF_ERROR(
+              GenerateScanRanges(entry.second.split_specs, &expanded_locations));
+        }
+      }
+      if (node_schedule_oldest_to_newest) {
+        DCHECK_GE(expanded_locations.size(),
+            entry.second.concrete_ranges.size() + entry.second.split_specs.size());
+        // This only makes sense for HDFS scan nodes
+        DCHECK(node.__isset.hdfs_scan_node);
+        // Sort the scan ranges by modification time ascending. In debug mode, do
+        // additional validation of the ordering.
+#ifndef NDEBUG
+        std::sort(expanded_locations.begin(), expanded_locations.end(),
+            ScanRangeOldestToNewestComparatorWithValidation);
+#else
+        std::sort(expanded_locations.begin(), expanded_locations.end(),
+            ScanRangeOldestToNewestComparator);
+#endif
       }
       DCHECK(locations != nullptr);
       RETURN_IF_ERROR(

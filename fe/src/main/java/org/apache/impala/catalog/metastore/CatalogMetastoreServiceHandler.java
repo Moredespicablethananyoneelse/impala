@@ -873,9 +873,9 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
       String destDb = MetaStoreUtils.parseDbName(destDbWithCatalog, serverConf_)[1];
       EventSequence catalogTimeline = NoOpEventSequence.INSTANCE;
       srcTbl = catalogOpExecutor_.getExistingTable(sourceDb, sourceTbl, apiName,
-          catalogTimeline);
+          /*queryId*/null, catalogTimeline);
       destinationTbl = catalogOpExecutor_.getExistingTable(destDb, destTbl, apiName,
-          catalogTimeline);
+          /*queryId*/null, catalogTimeline);
 
       if (!catalog_.tryWriteLock(
           new org.apache.impala.catalog.Table[] {srcTbl, destinationTbl})) {
@@ -920,9 +920,9 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
       String destDb = MetaStoreUtils.parseDbName(destDbWithCatalog, serverConf_)[1];
       EventSequence catalogTimeline = NoOpEventSequence.INSTANCE;
       srcTbl = catalogOpExecutor_.getExistingTable(sourceDb, sourceTbl, apiName,
-          catalogTimeline);
+          /*queryId*/null, catalogTimeline);
       destinationTbl = catalogOpExecutor_.getExistingTable(destDb, destTbl, apiName,
-          catalogTimeline);
+          /*queryId*/null, catalogTimeline);
 
       if (!catalog_.tryWriteLock(
           new org.apache.impala.catalog.Table[] {srcTbl, destinationTbl})) {
@@ -1216,7 +1216,7 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
     org.apache.impala.catalog.Table tbl = null;
     try {
       String dbName = MetaStoreUtils.parseDbName(dbNameWithCatalog, serverConf_)[1];
-      tbl = catalogOpExecutor_.getExistingTable(dbName, tblName, apiName,
+      tbl = catalogOpExecutor_.getExistingTable(dbName, tblName, apiName, /*queryId*/null,
           NoOpEventSequence.INSTANCE);
     } catch (Exception e) {
       rethrowException(e, apiName);
@@ -1331,10 +1331,10 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
             MetastoreEventsProcessor.getNextMetastoreEventsInBatchesForTable(catalog_,
                 currentEventId, newTable.getDbName(), newTable.getTableName(),
                 MetastoreEvents.AlterTableEvent.EVENT_TYPE);
-        Preconditions.checkState(events.size() == 1, String.format("For table %s.%s, "
+        Preconditions.checkState(events.size() == 1, "For table %s.%s, "
             + "from event id: %s, expected ALTER_TABLE events size to be 1 but is %s",
             newTable.getDbName(), newTable.getTableName(), currentEventId,
-            events.size()));
+            events.size());
 
         MetastoreEvents.MetastoreEvent event = metastoreEventFactory_.get(events.get(0),
             metastoreEventsMetrics_);

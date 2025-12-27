@@ -192,6 +192,13 @@ public class BackendConfig {
     return backendCfg_.blacklisted_dbs;
   }
 
+  public int getMinJdbcScanCardinality() {
+    if (backendCfg_.isSetMin_jdbc_scan_cardinality()) {
+      return backendCfg_.getMin_jdbc_scan_cardinality();
+    }
+    return 10;
+  }
+
   public String getBlacklistedTables() {
     return backendCfg_.blacklisted_tables;
   }
@@ -596,5 +603,33 @@ public class BackendConfig {
 
   public boolean truncateExternalTablesWithHms() {
     return backendCfg_.truncate_external_tables_with_hms;
+  }
+
+  public double getTupleCacheCostCoefficientWriteBytes() {
+    return backendCfg_.tuple_cache_cost_coefficient_write_bytes;
+  }
+
+  public double getTupleCacheCostCoefficientWriteRows() {
+    return backendCfg_.tuple_cache_cost_coefficient_write_rows;
+  }
+
+  public double getTupleCacheCostCoefficientReadBytes() {
+    return backendCfg_.tuple_cache_cost_coefficient_read_bytes;
+  }
+
+  public double getTupleCacheCostCoefficientReadRows() {
+    return backendCfg_.tuple_cache_cost_coefficient_read_rows;
+  }
+
+  public int getMaxStmtMetadataLoaderThreads() {
+    return backendCfg_.max_stmt_metadata_loader_threads;
+  }
+
+  public boolean isDisableHmsSyncByDefault() {
+    return backendCfg_.disable_hms_sync_by_default;
+  }
+
+  public void setDisableHmsSyncByDefault(boolean disableHmsSyncByDefault) {
+    backendCfg_.disable_hms_sync_by_default = disableHmsSyncByDefault;
   }
 }

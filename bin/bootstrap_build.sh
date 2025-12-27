@@ -18,7 +18,7 @@
 # under the License.
 
 # This script builds Impala from scratch. It is known to work on Ubuntu versions 16.04,
-# 18.04, 20.04, and 22.04. To run it you need to have:
+# 18.04, 20.04, 22.04 and 24.04. To run it you need to have:
 #
 # 1. At least 8GB of free disk space
 # 4. A connection to the internet (parts of the build download dependencies)
@@ -36,7 +36,7 @@ sudo -E apt-get --quiet update
 # unversioned python-dev and python-setuptools are not available on newer releases
 # that don't support Python 2. Add them only when they exist for the platform,
 # otherwise set Python 3 to be the default Python version.
-PACKAGES='g++ gcc git libsasl2-dev libssl-dev make
+PACKAGES='g++ gcc git libsasl2-dev libssl-dev make ninja-build
      python3-dev python3-setuptools python3-venv libffi-dev language-pack-en
      libkrb5-dev krb5-admin-server krb5-kdc krb5-user libxml2-dev libxslt-dev wget'
 
@@ -66,8 +66,13 @@ if [[ $DISTRIB_ID == Ubuntu && $DISTRIB_RELEASE == 20.04 ]]; then
 fi
 
 JDK_VERSION=17
+if [[ "$(uname -p)" == 'aarch64' ]]; then
+  PACKAGE_ARCH='arm64'
+else
+  PACKAGE_ARCH='amd64'
+fi
 sudo apt-get --yes --quiet install openjdk-${JDK_VERSION}-jdk openjdk-${JDK_VERSION}-source
-export JAVA_HOME=/usr/lib/jvm/java-${JDK_VERSION}-openjdk-amd64
+export JAVA_HOME=/usr/lib/jvm/java-${JDK_VERSION}-openjdk-${PACKAGE_ARCH}
 
 # Download Maven since the packaged version is pretty old.
 : ${IMPALA_TOOLCHAIN_HOST:=native-toolchain.s3.amazonaws.com}

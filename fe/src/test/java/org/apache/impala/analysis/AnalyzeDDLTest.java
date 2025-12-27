@@ -379,6 +379,15 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalyzesOk(partitioned + "(hour(event_time) in ('2020-01-01-9', '2020-01-01-1'))");
     AnalyzesOk(evolution + "(truncate(4,date_string_col,4) = '1231')");
     AnalyzesOk(evolution + "(month = 12)");
+    // Paimon ADD/DROP PARTITION Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " ADD PARTITION (userid = 3) ",
+        "ALTER TABLE not allowed on PAIMON table: " +
+         "functional_parquet.paimon_partitioned");
+    AnalysisError(paimon_partitioned + " DROP PARTITION (userid = 3) ",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -518,6 +527,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("alter table functional.alltypes add column new_col int not null",
         "The specified column options are only supported in Kudu tables: " +
         "new_col INT NOT NULL");
+    // Paimon ADD COLUMN Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " add column new_col int not null",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -605,6 +620,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("alter table functional.alltypes add columns(new_col int not null)",
         "The specified column options are only supported in Kudu tables: " +
         "new_col INT NOT NULL");
+    // Paimon ADD COLUMNS Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " add columns(new_col int not null)",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -664,6 +685,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Cannot ALTER TABLE REPLACE COLUMNS on a Kudu table.
     AnalysisError("alter table functional_kudu.alltypes replace columns (i int)",
         "ALTER TABLE REPLACE COLUMNS is not supported on Kudu tables.");
+    // Paimon REPLACE COLUMNS Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " replace columns (i int)",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -702,6 +729,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Cannot ALTER TABLE DROP COLUMN on an HBase table.
     AnalysisError("alter table functional_hbase.alltypes drop column int_col",
         "ALTER TABLE DROP COLUMN not currently supported on HBase tables.");
+    // Paimon DROP COLUMNS Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " drop column userid",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -756,6 +789,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Cannot ALTER TABLE CHANGE COLUMN on an HBase table.
     AnalysisError("alter table functional_hbase.alltypes CHANGE COLUMN int_col i int",
         "ALTER TABLE CHANGE/ALTER COLUMN not currently supported on HBase tables.");
+    // Paimon CHANGE COLUMNS Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " change column userid user_id bigint",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -789,6 +828,13 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "delimited fields terminated by ' '",
         "ALTER TABLE SET ROW FORMAT not allowed on a table STORED BY JDBC: " +
         "functional.alltypes_jdbc_datasource");
+    // Paimon SET ROW FORMAT Test
+    String paimon_partitioned =
+        "ALTER TABLE functional_parquet.paimon_partitioned";
+    AnalysisError(paimon_partitioned + " set row format " +
+        "delimited fields terminated by ' '",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1063,7 +1109,28 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Cannot ALTER TABLE SET on an HBase table.
     AnalysisError("alter table functional_hbase.alltypes set tblproperties('a'='b')",
         "ALTER TABLE SET not currently supported on HBase tables.");
-
+    // Cannot ALTER TABLE SET on an Paimon table.
+    AnalysisError("alter table functional_parquet.paimon_partitioned set " +
+        "serdeproperties ('a'='2')","ALTER TABLE not allowed " +
+        "on PAIMON table: functional_parquet.paimon_partitioned");
+    AnalysisError("alter table functional_parquet.paimon_partitioned " +
+        "PARTITION (year=2010) set tblproperties ('a'='2')",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
+    AnalysisError("alter table functional_parquet.paimon_partitioned set tblproperties" +
+        " ('__IMPALA_DATA_SOURCE_NAME'='test')","ALTER TABLE not allowed on" +
+        " PAIMON table: functional_parquet.paimon_partitioned");
+    AnalysisError("alter table functional_parquet.paimon_partitioned unset " +
+        "serdeproperties ('a')","ALTER TABLE not allowed on PAIMON table:" +
+        " functional_parquet.paimon_partitioned");
+    AnalysisError("alter table functional_parquet.paimon_partitioned PARTITION " +
+        "(year=2010) unset tblproperties ('a')",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
+    AnalysisError("alter table functional_parquet.paimon_partitioned " +
+        "unset tblproperties ('__IMPALA_DATA_SOURCE_NAME')",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
     // serialization.encoding
     AnalyzesOk("alter table functional.alltypes set serdeproperties(" +
         "'serialization.encoding'='GBK')");
@@ -1192,6 +1259,11 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "'testPool'",
         "ALTER TABLE SET CACHED not allowed on a table STORED BY JDBC: " +
         "functional.alltypes_jdbc_datasource");
+    // Cannot ALTER TABLE to set cached for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned set cached in " +
+            "'testPool'",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1337,6 +1409,11 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError(
         "alter table functional.alltypes set column stats string_col ('avgSize'='inf')",
         "Invalid stats value 'inf' for column stats key: avgSize");
+    // Cannot ALTER TABLE to set column stats for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned set column stats" +
+            " userid ('avgSize'='8')",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1482,6 +1559,11 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalyzesOk("alter table functional.alltypes_datasource rename to new_datasrc_tbl");
     AnalyzesOk("alter table functional.alltypes_jdbc_datasource rename to " +
         "new_jdbc_datasrc_tbl");
+    // Cannot ALTER TABLE rename for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned rename to" +
+            " new_datasrc_tbl",
+        "ALTER TABLE RENAME statement not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1501,6 +1583,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("alter table functional_hbase.alltypes recover partitions",
         "ALTER TABLE RECOVER PARTITIONS must target an HDFS table: " +
         "functional_hbase.alltypes");
+    // Cannot ALTER TABLE recover partitions for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned RECOVER PARTITIONS",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1519,6 +1605,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("alter table functional.alltypes_jdbc_datasource sort by (id)",
         "ALTER TABLE SORT BY not allowed on a table STORED BY JDBC: " +
         "functional.alltypes_jdbc_datasource");
+    // Cannot ALTER TABLE to sort by  for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned sort by (userid)",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1541,6 +1631,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("alter table functional.alltypes_jdbc_datasource sort by zorder (id)",
         "ALTER TABLE SORT BY not allowed on a table STORED BY JDBC: " +
         "functional.alltypes_jdbc_datasource");
+    // Cannot ALTER TABLE to sort by  for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned sort by (userid)",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -1797,6 +1891,11 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "default", "Unsupported column option for non-Kudu table: DROP DEFAULT");
     AnalysisError("alter table functional.alltypes_jdbc_datasource alter int_col drop " +
         "default", "Unsupported column option for non-Kudu table: DROP DEFAULT");
+    // Cannot ALTER TABLE after drop for PAIMON tables.
+    AnalysisError("alter table functional_parquet.paimon_partitioned alter int_col" +
+            " set comment 'a' ",
+        "ALTER TABLE not allowed on PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   ComputeStatsStmt checkComputeStatsStmt(String stmt) throws AnalysisException {
@@ -1963,7 +2062,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
       AnalysisError(
           "compute stats functional.alltypes_datasource tablesample system (3)",
           "TABLESAMPLE is only supported on file-based tables.");
-
+      // Cannot COMPUTE STATS for PAIMON tables.
+      AnalysisError("compute stats functional_parquet.paimon_partitioned",
+          "COMPUTE STATS not supported for PAIMON table: " +
+              "functional_parquet.paimon_partitioned");
       // Test different COMPUTE_STATS_MIN_SAMPLE_BYTES.
       TQueryOptions queryOpts = new TQueryOptions();
 
@@ -2037,8 +2139,12 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "partition(year=2010, month=1, day is NULL)");
 
     AnalysisError("compute incremental stats functional_hbase.alltypes " +
-        "partition(year=2010, month=1)", "COMPUTE INCREMENTAL ... PARTITION not " +
-        "supported for non-HDFS table functional_hbase.alltypes");
+        "partition(year=2010, month=1)", "COMPUTE INCREMENTAL STATS ... PARTITION not " +
+        "supported for non-filesystem-based table functional_hbase.alltypes");
+
+    AnalysisError("compute incremental stats functional_parquet.iceberg_partitioned "
+            + "partition(year=2010, month=1)", "COMPUTE INCREMENTAL STATS ... PARTITION "
+            + "not supported for Iceberg table functional_parquet.iceberg_partitioned");
 
     AnalysisError("compute incremental stats functional.view_view",
         "COMPUTE STATS not supported for view: functional.view_view");
@@ -2085,6 +2191,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "compute incremental stats functional.alltypes partition(year=2009, month<12)");
 
     BackendConfig.INSTANCE.getBackendCfg().setInc_stats_size_limit_bytes(bytes);
+    // Cannot COMPUTE INCREMENTAL STATS for PAIMON tables.
+    AnalysisError("compute incremental stats functional_parquet.paimon_partitioned",
+        "COMPUTE STATS not supported for PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
 
@@ -2097,6 +2207,17 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError(
         "drop incremental stats functional.alltypes partition(year=9999, month=10)",
         "No matching partition(s) found.");
+    AnalysisError("drop incremental stats functional_hbase.alltypes "
+            + "partition(year=2010, month=1)", "DROP INCREMENTAL STATS ... PARTITION "
+            + "not supported for non-filesystem-based table functional_hbase.alltypes");
+    AnalysisError("drop incremental stats functional_parquet.iceberg_partitioned "
+            + "partition(year=2010, month=1)", "DROP INCREMENTAL STATS ... PARTITION "
+            + "not supported for Iceberg table functional_parquet.iceberg_partitioned");
+    // Cannot DROP INCREMENTAL STATS for PAIMON tables.
+    AnalysisError("drop incremental stats functional_parquet.paimon_partitioned" +
+            " partition(userid=10)",
+        "DROP STATS not allowed on a PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
 
@@ -2115,6 +2236,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "Syntax error");
     AnalysisError("drop stats functional.alltypes partition(year, month)",
         "Syntax error");
+    // Cannot DROP  STATS for PAIMON tables.
+    AnalysisError("drop stats functional_parquet.paimon_partitioned",
+        "DROP STATS not allowed on a PAIMON table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -2208,6 +2333,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Cannot truncate a non hdfs table.
     AnalysisError("truncate table functional.alltypes_view",
         "TRUNCATE TABLE not supported on non-HDFS table: functional.alltypes_view");
+    // Cannot TRUNCATE for PAIMON tables.
+    AnalysisError("truncate table functional_parquet.paimon_partitioned",
+        "TRUNCATE TABLE not supported on non-HDFS table: " +
+            "functional_parquet.paimon_partitioned");
   }
 
   @Test
@@ -2346,6 +2475,9 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("create table newtbl_jdbc like parquet " +
         "'/test-warehouse/schemas/alltypestiny.parquet' stored as JDBC",
         "CREATE TABLE LIKE FILE statement is not supported for JDBC tables.");
+    AnalysisError("create table newtbl_jdbc like parquet " +
+            "'/test-warehouse/schemas/alltypestiny.parquet' stored AS PAIMON",
+        "CREATE TABLE LIKE FILE statement is not supported for PAIMON tables.");
   }
 
   @Test
@@ -2551,9 +2683,11 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("create table t primary key (id) partition by hash partitions 3" +
         " stored as kudu as select id, m from functional.complextypes_fileformat",
         "Cannot create table 't': Type MAP<STRING,BIGINT> is not supported in Kudu");
-    AnalysisError("create table t primary key (id) partition by hash partitions 3" +
-        " stored as kudu as select id, a from functional.complextypes_fileformat",
-        "Cannot create table 't': Type ARRAY<INT> is not supported in Kudu");
+    AnalysisError("create table t primary key (id) partition by hash partitions 3"
+            + " stored as kudu as select id, a from functional.complextypes_fileformat",
+        "Unable to INSERT into target table (default.t) because the column 'a' has "
+            + "a complex type 'ARRAY<INT>' and Impala doesn't support inserting into "
+            + "tables containing complex type columns");
 
     // IMPALA-6454: CTAS into Kudu tables with primary key specified in upper case.
     AnalyzesOk("create table part_kudu_tbl primary key(INT_COL, SMALLINT_COL, ID)" +
@@ -2750,6 +2884,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "functional.alltypes");
     AnalysisError("create table tbl sort by zorder (int_col,foo) like " +
         "functional.alltypes", "Could not find SORT BY column 'foo' in table.");
+    // Cannot support create table like for PAIMON tables.
+    AnalysisError("create table test_like like functional_parquet.paimon_partitioned" +
+            " STORED BY PAIMON",
+        "CREATE TABLE LIKE is not supported for PAIMON tables.");
   }
 
   @Test
@@ -4261,10 +4399,10 @@ public class AnalyzeDDLTest extends FrontendTestBase {
       // Cannot show files on a non hdfs table.
       AnalysisError(String.format("show files in functional.alltypes_view %s",
           partition),
-          "SHOW FILES not applicable to a non hdfs table: functional.alltypes_view");
+          "SHOW FILES not allowed on a view: functional.alltypes_view");
       AnalysisError(String.format("show files in allcomplextypes.int_array_col %s",
           partition), createAnalysisCtx("functional"),
-          "SHOW FILES not applicable to a non hdfs table: allcomplextypes.int_array_col");
+          "SHOW FILES not allowed on a nested collection: allcomplextypes.int_array_col");
     }
 
     // Not a partition column.
@@ -4279,6 +4417,63 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Partition spec does not exist
     AnalysisError("show files in functional.alltypes partition(year=2010,month=NULL)",
         "No matching partition(s) found.");
+
+    // Iceberg SHOW FILES tests
+    String icebergPartitioned =
+        "show files in functional_parquet.iceberg_partitioned";
+    String icebergEvolution =
+        "show files in functional_parquet.iceberg_partition_evolution";
+    String icebergNonPartitioned =
+        "show files in functional_parquet.iceberg_non_partitioned";
+
+    // Non-partitioned Iceberg table
+    AnalysisError(icebergNonPartitioned + " partition (user = 'Alan')",
+        "Table is not partitioned: functional_parquet.iceberg_non_partitioned");
+
+    // Valid Iceberg partition filters
+    AnalyzesOk(icebergPartitioned + " partition (action = 'click')");
+    AnalyzesOk(
+        icebergPartitioned + " partition (action = 'click' or action = 'download')");
+    AnalyzesOk(icebergPartitioned + " partition (action in ('click', 'download'))");
+    AnalyzesOk(icebergPartitioned + " partition (hour(event_time) = '2020-01-01-9')");
+    AnalyzesOk(icebergPartitioned + " partition (hour(event_time) > '2020-01-01-01')");
+    AnalyzesOk(icebergPartitioned + " partition (hour(event_time) < '2020-02-01-01')");
+    AnalyzesOk(icebergPartitioned
+        + " partition (hour(event_time) in ('2020-01-01-9', '2020-01-01-1'))");
+    AnalyzesOk(icebergPartitioned
+        + " partition (hour(event_time) = '2020-01-01-9', action = 'click')");
+    AnalyzesOk(icebergEvolution + " partition (truncate(4,date_string_col,4) = '1231')");
+    AnalyzesOk(icebergEvolution + " partition (month = 12)");
+
+    // Error cases for Iceberg partition filters
+    // Non-existent partition should throw error (consistent with regular tables)
+    AnalysisError(icebergPartitioned + " partition (action = 'Foo')",
+        "No matching partition(s) found.");
+    AnalysisError(icebergPartitioned + " partition (user = 'Alan')",
+        "Partition exprs cannot contain non-partition column(s): `user`");
+    AnalysisError(
+        icebergPartitioned + " partition (user = 'Alan' or user = 'Lisa' and id > 10)",
+        "Partition exprs cannot contain non-partition column(s): `user`");
+    AnalysisError(icebergPartitioned + " partition (void(action) = 'click')",
+        "VOID transform is not supported for partition selection");
+    AnalysisError(icebergPartitioned + " partition (day(action) = 'Alan')",
+        "Can't filter column 'action' with transform type: 'DAY'");
+    AnalysisError(icebergPartitioned + " partition (action = action)",
+        "Invalid partition filtering expression: action = action");
+    AnalysisError(icebergPartitioned + " partition (action = action and action = 'click' "
+            + "or hour(event_time) > '2020-01-01-01')",
+        "Invalid partition filtering expression: "
+            + "action = action AND action = 'click' OR HOUR(event_time) > 438289");
+    AnalysisError(icebergPartitioned + " partition (action)",
+        "Invalid partition filtering expression: action");
+    AnalysisError(icebergPartitioned + " partition (2)",
+        "Invalid partition filtering expression: 2");
+    AnalysisError(icebergPartitioned + " partition (truncate(action))",
+        "BUCKET and TRUNCATE partition transforms should have a parameter");
+    AnalysisError(icebergPartitioned + " partition (truncate('string', action))",
+        "Invalid transform parameter value: string");
+    AnalysisError(icebergPartitioned + " partition (truncate(1, 2, action))",
+        "Invalid partition predicate: truncate(1, 2, action)");
   }
 
   @Test
@@ -4311,6 +4506,88 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "SHOW PARTITIONS not applicable to a view: functional.view_view");
     AnalysisError("show partitions functional_hbase.alltypes",
         "SHOW PARTITIONS must target an HDFS or Kudu table: functional_hbase.alltypes");
+
+    // Tests for WHERE clause in SHOW PARTITIONS (IMPALA-14065)
+    // Valid WHERE clauses with partition columns on HDFS tables
+    AnalyzesOk("show partitions functional.alltypes where year = 2009");
+    AnalyzesOk("show partitions functional.alltypes where year = 2009 and month = 1");
+    AnalyzesOk("show partitions functional.alltypes where year > 2009");
+    AnalyzesOk("show partitions functional.alltypes where year >= 2009 and month < 10");
+    AnalyzesOk("show partitions functional.alltypes where year in (2009, 2010)");
+    AnalyzesOk("show partitions functional.alltypes where year between 2009 and 2010");
+    AnalyzesOk("show partitions functional.alltypes where month is null");
+    AnalyzesOk("show partitions functional.alltypes where month is not null");
+    AnalyzesOk("show partitions functional.alltypes where year = 2009 or month = 5");
+
+    // WHERE clause with non-partition columns should fail
+    AnalysisError("show partitions functional.alltypes where id = 1",
+        "SHOW PARTITIONS WHERE supports only partition columns");
+    AnalysisError("show partitions functional.alltypes where year = 2009 and id = 1",
+        "SHOW PARTITIONS WHERE supports only partition columns");
+
+    // WHERE clause with subqueries should fail
+    AnalysisError("show partitions functional.alltypes where year in " +
+        "(select year from functional.alltypes)",
+        "Subqueries are not allowed in SHOW PARTITIONS WHERE");
+
+    // WHERE clause with analytic functions should fail
+    AnalysisError("show partitions functional.alltypes where " +
+        "row_number() over (order by year) = 1",
+        "Analytic expressions are not allowed in SHOW PARTITIONS WHERE");
+
+    // WHERE clause with Kudu table should fail (non-HDFS tables don't support WHERE)
+    AnalysisError("show partitions functional_kudu.alltypes where year = 2009",
+        "WHERE clause in SHOW PARTITIONS is only supported for HDFS tables");
+
+    // WHERE clause with Iceberg table should fail
+    AnalysisError("show partitions functional_parquet.iceberg_int_partitioned " +
+        "where i = 1",
+        "WHERE clause in SHOW PARTITIONS is only supported for HDFS tables");
+
+    // WHERE clause must be a boolean expression
+    AnalysisError("show partitions functional.alltypes where year",
+        "WHERE clause '`year`' requires return type 'BOOLEAN'. Actual type is 'INT'.");
+
+    // Tests for more complex WHERE clause predicates
+    // String operations: LIKE and REGEXP
+    AnalyzesOk("show partitions functional.stringpartitionkey where " +
+        "string_col like '2%'");
+    AnalyzesOk("show partitions functional.stringpartitionkey where " +
+        "string_col regexp '^partition'");
+
+    // Arithmetic expressions
+    AnalyzesOk("show partitions functional.alltypes where month + 1 = 2");
+    AnalyzesOk("show partitions functional.alltypes where year * 2 > 4000");
+
+    // CAST expressions
+    AnalyzesOk("show partitions functional.stringpartitionkey where " +
+        "cast(string_col as timestamp) > '2009-01-01'");
+
+    // CASE expressions
+    AnalyzesOk("show partitions functional.alltypes where " +
+        "case when year > 2009 then 1 else 0 end = 1");
+    AnalyzesOk("show partitions functional.alltypes where " +
+        "case when month <= 6 then 'H1' else 'H2' end = 'H1'");
+
+    // Non-deterministic functions
+    // rand() - should evaluate per partition
+    AnalyzesOk("show partitions functional.alltypes where month = rand()");
+    AnalyzesOk("show partitions functional.alltypes where " +
+        "month <= floor(rand() * 12) + 1");
+    AnalyzesOk("show partitions functional.alltypes where rand() < 0.5");
+
+    // uuid() - should evaluate per partition
+    AnalyzesOk("show partitions functional.alltypes where month = length(uuid()) / 3");
+    AnalyzesOk("show partitions functional.alltypes where length(uuid()) > 30");
+
+    // now() - should evaluate per partition
+    AnalyzesOk("show partitions functional.alltypes where month = month(now())");
+    AnalyzesOk("show partitions functional.alltypes where year <= year(now())");
+
+    // Complex expressions with non-deterministic functions
+    AnalyzesOk("show partitions functional.stringpartitionkey where " +
+        "string_col like cast(concat(cast(floor(rand() * 10) as string), '%') " +
+        "as string)");
   }
 
   @Test
@@ -4686,6 +4963,22 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "An invalid TIMESTAMP expression has been "
             + "given to EXECUTE REMOVE_ORPHAN_FILES(<expression>): the expression "
             + "'1111' cannot be converted to a TIMESTAMP");
+  }
+
+  @Test
+  public void TestAlterExecuteRepairMetadata() {
+    AnalyzesOk("alter table functional_parquet.iceberg_partitioned execute "
+        + "repair_metadata();");
+
+    // Negative tests
+    AnalysisError("alter table nodb.alltypes execute repair_metadata();",
+        "Could not resolve table reference: 'nodb.alltypes'");
+    AnalysisError("alter table functional.alltypes execute repair_metadata();",
+        "ALTER TABLE EXECUTE REPAIR_METADATA is only supported for Iceberg tables: "
+            + "functional.alltypes");
+    AnalysisError("alter table functional_parquet.iceberg_partitioned execute "
+            + "repair_metadata('2024-02-11 10:00:00');",
+        "EXECUTE REPAIR_METADATA() should have no parameter");
   }
 
   private static String buildLongOwnerName() {

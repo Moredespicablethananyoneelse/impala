@@ -17,28 +17,26 @@
 
 package org.apache.impala.calcite.service;
 
-
-import java.util.ArrayList;
-import java.util.List;
-
 import org.apache.calcite.rel.RelNode;
-import org.apache.impala.analysis.AnalysisDriver;
+import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Values;
 import org.apache.impala.analysis.ExprSubstitutionMap;
 import org.apache.impala.analysis.ParsedStatement;
 import org.apache.impala.calcite.rel.node.ImpalaPlanRel;
 import org.apache.impala.calcite.rel.node.NodeWithExprs;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.planner.DataSink;
-import org.apache.impala.planner.PlannerContext;
 import org.apache.impala.planner.PlanNode;
 import org.apache.impala.planner.PlanRootSink;
+import org.apache.impala.planner.PlannerContext;
 import org.apache.impala.planner.SingleNodePlannerIntf;
 import org.apache.impala.thrift.TColumn;
 import org.apache.impala.thrift.TResultSetMetadata;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 
 /**
  * Implementation of the SingleNodePlannerIntf which returns a PlanNode
@@ -52,6 +50,8 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
   private final PlannerContext ctx_;
   private final CalciteAnalysisResult analysisResult_;
   private NodeWithExprs rootNode_;
+  private List<String> fieldNames_;
+  private boolean returnsMoreThanOneRow_;
 
   public CalciteSingleNodePlanner(PlannerContext ctx) {
     ctx_ = ctx;
@@ -63,11 +63,14 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
     CalciteRelNodeConverter relNodeConverter =
         new CalciteRelNodeConverter(analysisResult_);
     RelNode logicalPlan = relNodeConverter.convert(analysisResult_.getValidatedNode());
+    fieldNames_ = relNodeConverter.getFieldNames(analysisResult_.getValidatedNode());
 
     // Optimize the query
     CalciteOptimizer optimizer =
         new CalciteOptimizer(analysisResult_, ctx_.getTimeline());
     ImpalaPlanRel optimizedPlan = optimizer.optimize(logicalPlan);
+
+    returnsMoreThanOneRow_ = returnsMoreThanOneRow(optimizedPlan);
 
     // Create Physical Impala PlanNodes
     CalcitePhysPlanCreator physPlanCreator =
@@ -84,12 +87,52 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
    */
   @Override
   public DataSink createDataSink(ExprSubstitutionMap rootNodeSmap) {
-    return new PlanRootSink(rootNode_.outputExprs_);
+    return PlanRootSink.create(ctx_, rootNode_.outputExprs_, returnsMoreThanOneRow_);
+  }
+
+  private boolean returnsMoreThanOneRow(RelNode logicalPlan) {
+    return !isSingleRowValues(logicalPlan) && !hasOneRowAgg(logicalPlan);
+  }
+
+  private boolean isSingleRowValues(RelNode relNode) {
+    // A project will keep the row count the same. Theoretically, a filter
+    // can reduce the row count, but there should not be any filter
+    // over a values clause because the optimization rules should take
+    // care of this situation.
+    while (relNode instanceof Project) {
+      relNode = relNode.getInput(0);
+    }
+
+    if (!(relNode instanceof Values)) {
+      return false;
+    }
+
+    Values values = (Values) relNode;
+    return Values.isEmpty(values) || Values.isSingleValue(values);
+  }
+
+  /**
+   * Checks if there is an aggregation at the root that guarantees there
+   * will be at most one row. Avoid aggs that have groups via a group keyword
+   * or a distinct keyword.
+   */
+  private boolean hasOneRowAgg(RelNode relNode) {
+    while (ImpalaPlanRel.canPassThroughParentAggregate(relNode)) {
+      relNode = relNode.getInput(0);
+    }
+    if (!(relNode instanceof Aggregate)) {
+      return false;
+    }
+    Aggregate agg = (Aggregate) relNode;
+    if (agg.getGroupCount() > 0 || agg.containsDistinctCall()) {
+      return false;
+    }
+    return true;
   }
 
   @Override
   public List<String> getColLabels() {
-    return rootNode_.fieldNames_;
+    return fieldNames_;
   }
 
   @Override
@@ -97,7 +140,7 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
     TResultSetMetadata metadata = new TResultSetMetadata();
     int colCnt = rootNode_.outputExprs_.size();
     for (int i = 0; i < colCnt; ++i) {
-      TColumn colDesc = new TColumn(rootNode_.fieldNames_.get(i).toLowerCase(),
+      TColumn colDesc = new TColumn(fieldNames_.get(i),
           rootNode_.outputExprs_.get(i).getType().toThrift());
       metadata.addToColumns(colDesc);
     }

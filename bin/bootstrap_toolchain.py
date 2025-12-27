@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -88,7 +88,8 @@ OS_MAPPING = [
   OsMapping('ubuntu16', "ec2-package-ubuntu-16-04"),
   OsMapping('ubuntu18', "ec2-package-ubuntu-18-04"),
   OsMapping('ubuntu20', "ec2-package-ubuntu-20-04"),
-  OsMapping('ubuntu22', "ec2-package-ubuntu-22-04")
+  OsMapping('ubuntu22', "ec2-package-ubuntu-22-04"),
+  OsMapping('ubuntu24', "ec2-package-ubuntu-24-04")
 ]
 
 
@@ -472,7 +473,7 @@ def get_toolchain_downloads():
   gcc_package = ToolchainPackage("gcc")
   toolchain_packages += [llvm_package, llvm_package_asserts, gcc_package]
   toolchain_packages += [ToolchainPackage(p) for p in
-      ["avro", "binutils", "boost", "breakpad", "bzip2", "calloncehack", "cctz",
+      ["arrow", "avro", "binutils", "boost", "breakpad", "bzip2", "calloncehack", "cctz",
        "cloudflarezlib", "cmake", "crcutil", "curl", "flatbuffers", "gdb", "gflags",
        "glog", "gperftools", "jwt-cpp", "libev", "libunwind", "lz4", "mold",
        "openldap", "opentelemetry-cpp", "orc", "protobuf", "python", "rapidjson", "re2",
@@ -505,7 +506,7 @@ def get_hadoop_downloads():
   cluster_components = []
   use_apache_hadoop = os.environ["USE_APACHE_HADOOP"] == "true"
   use_apache_hbase = os.environ["USE_APACHE_HBASE"] == "true"
-  use_apache_hive = os.environ["USE_APACHE_HIVE"] == "true"
+  use_apache_hive = os.environ["USE_APACHE_HIVE_3"] == "true"
   use_apache_tez = os.environ["USE_APACHE_TEZ"] == "true"
   use_apache_ranger = os.environ["USE_APACHE_RANGER"] == "true"
   use_apache_ozone = os.environ["USE_APACHE_OZONE"] == "true"

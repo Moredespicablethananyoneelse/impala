@@ -76,6 +76,7 @@ import org.apache.impala.analysis.AlterDbStmt;
 import org.apache.impala.analysis.AnalysisContext;
 import org.apache.impala.analysis.AnalysisContext.AnalysisResult;
 import org.apache.impala.analysis.CommentOnStmt;
+import org.apache.impala.analysis.ConvertTableToIcebergStmt;
 import org.apache.impala.analysis.CopyTestCaseStmt;
 import org.apache.impala.analysis.CreateDataSrcStmt;
 import org.apache.impala.analysis.CreateDropRoleStmt;
@@ -108,6 +109,7 @@ import org.apache.impala.analysis.StmtMetadataLoader;
 import org.apache.impala.analysis.StmtMetadataLoader.StmtTableCache;
 import org.apache.impala.analysis.TableName;
 import org.apache.impala.analysis.TableRef;
+import org.apache.impala.analysis.ToSqlUtils;
 import org.apache.impala.analysis.TruncateStmt;
 import org.apache.impala.authentication.saml.ImpalaSamlClient;
 import org.apache.impala.authorization.AuthorizationChecker;
@@ -142,7 +144,6 @@ import org.apache.impala.catalog.MaterializedViewHdfsTable;
 import org.apache.impala.catalog.MetaStoreClientPool;
 import org.apache.impala.catalog.MetaStoreClientPool.MetaStoreClient;
 import org.apache.impala.catalog.StructType;
-import org.apache.impala.catalog.SystemTable;
 import org.apache.impala.catalog.TableLoadingException;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.catalog.local.InconsistentMetadataFetchException;
@@ -150,6 +151,7 @@ import org.apache.impala.catalog.iceberg.IcebergMetadataTable;
 import org.apache.impala.catalog.paimon.FePaimonTable;
 import org.apache.impala.catalog.paimon.FeShowFileStmtSupport;
 import org.apache.impala.common.AnalysisException;
+import org.apache.impala.common.UnsupportedFeatureException;
 import org.apache.impala.common.UserCancelledException;
 import org.apache.impala.common.FileSystemUtil;
 import org.apache.impala.common.ImpalaException;
@@ -170,7 +172,7 @@ import org.apache.impala.planner.HdfsScanNode;
 import org.apache.impala.planner.PlanFragment;
 import org.apache.impala.planner.Planner;
 import org.apache.impala.planner.ScanNode;
-import org.apache.impala.service.Frontend;
+import org.apache.impala.service.catalogmanager.FeCatalogManager;
 import org.apache.impala.thrift.CatalogLookupStatus;
 import org.apache.impala.thrift.TAlterDbParams;
 import org.apache.impala.thrift.TBackendGflags;
@@ -299,6 +301,7 @@ public class Frontend {
   private static final String CPU_ASK_BOUNDED = "CpuAskBounded";
   private static final String AVG_ADMISSION_SLOTS_PER_EXECUTOR =
       "AvgAdmissionSlotsPerExecutor";
+  private static final String CALCITE_FAILURE_REASON = "CalciteFailureReason";
 
   // info about the planner used. In this code, we will always use the Original planner,
   // but other planners may set their own planner values
@@ -680,6 +683,12 @@ public class Frontend {
     } else if (analysis.isShowCreateTableStmt()) {
       ddl.op_type = TCatalogOpType.SHOW_CREATE_TABLE;
       ddl.setShow_create_table_params(analysis.getShowCreateTableStmt().toThrift());
+      ddl.setShow_create_table_with_stats(analysis.getShowCreateTableStmt().withStats());
+      // Pass show_create_table_partition_limit from query options (default to 1000 if not set)
+      int partitionLimit = result.query_options.isSetShow_create_table_partition_limit()
+        ? result.query_options.getShow_create_table_partition_limit() :
+        (new TQueryOptions()).getShow_create_table_partition_limit();
+      ddl.setShow_create_table_partition_limit(partitionLimit);
       metadata.setColumns(Arrays.asList(
           new TColumn("result", Type.STRING.toThrift())));
     } else if (analysis.isShowCreateFunctionStmt()) {
@@ -1729,20 +1738,22 @@ public class Frontend {
   /**
    * Generate result set and schema for a SHOW TABLE STATS command.
    */
-  public TResultSet getTableStats(String dbName, String tableName, TShowStatsOp op)
+  public TResultSet getTableStats(String dbName, String tableName, TShowStatsOp op,
+      List<Long> filteredPartitionIds)
       throws ImpalaException {
     RetryTracker retries = new RetryTracker(
         String.format("fetching table stats from %s.%s", dbName, tableName));
     while (true) {
       try {
-        return doGetTableStats(dbName, tableName, op);
+        return doGetTableStats(dbName, tableName, op, filteredPartitionIds);
       } catch(InconsistentMetadataFetchException e) {
         retries.handleRetryOrThrow(e);
       }
     }
   }
 
-  private TResultSet doGetTableStats(String dbName, String tableName, TShowStatsOp op)
+  private TResultSet doGetTableStats(String dbName, String tableName, TShowStatsOp op,
+      List<Long> filteredPartitionIds)
       throws ImpalaException {
     FeTable table = getCatalog().getTable(dbName, tableName);
     if (table instanceof FeFsTable) {
@@ -1751,6 +1762,10 @@ public class Frontend {
       }
       if (table instanceof FeIcebergTable && op == TShowStatsOp.TABLE_STATS) {
         return FeIcebergTable.Utils.getTableStats((FeIcebergTable) table);
+      }
+      if (op == TShowStatsOp.PARTITIONS && filteredPartitionIds != null) {
+        // When filteredPartitionIds is set (even if empty), use it to filter results.
+        return ((FeFsTable) table).getTableStats(filteredPartitionIds);
       }
       return ((FeFsTable) table).getTableStats();
     } else if (table instanceof FeHBaseTable) {
@@ -2031,16 +2046,14 @@ public class Frontend {
    */
   private TQueryExecRequest createExecRequest(
       Planner planner, PlanCtx planCtx) throws ImpalaException {
+    TQueryExecRequest result = new TQueryExecRequest();
     TQueryCtx queryCtx = planner.getQueryCtx();
-    List<PlanFragment> planRoots = planner.createPlans();
+    List<PlanFragment> planRoots = planner.createPlans(result);
     if (planCtx.planCaptureRequested()) {
       planCtx.plan_ = planRoots;
     }
 
     // Compute resource requirements of the final plans.
-    TQueryExecRequest result = new TQueryExecRequest();
-    Planner.reduceCardinalityByRuntimeFilter(planRoots, planner.getPlannerCtx());
-    Planner.computeProcessingCost(planRoots, result, planner.getPlannerCtx());
     Planner.computeResourceReqs(planRoots, queryCtx, result,
         planner.getPlannerCtx(), planner.getAnalysisResult().isQueryStmt());
 
@@ -2392,14 +2405,16 @@ public class Frontend {
       PlanCtx planCtx, EventSequence timeline) throws ImpalaException {
     TExecRequest request = null;
     CompilerFactory compilerFactory = getCalciteCompilerFactory(planCtx);
+    String exceptionClass = null;
     if (compilerFactory != null) {
       try {
         request = getTExecRequest(compilerFactory, planCtx, timeline);
       } catch (Exception e) {
-        if (!shouldFallbackToRegularPlanner(planCtx)) {
+        if (!shouldFallbackToRegularPlanner(planCtx, e)) {
           throw e;
         }
-        LOG.info("Calcite planner failed: ", e);
+        LOG.info("Calcite planner failed: {}", e.getClass());
+        exceptionClass = e.getClass().toString();
         timeline.markEvent("Failing over from Calcite planner");
       }
     }
@@ -2410,21 +2425,24 @@ public class Frontend {
       compilerFactory = new CompilerFactoryImpl();
       request = getTExecRequest(compilerFactory, planCtx, timeline);
     }
-    addPlannerToProfile(compilerFactory.getPlannerString());
+    addPlannerToProfile(compilerFactory.getPlannerString(), exceptionClass);
     return request;
   }
 
-  private boolean shouldFallbackToRegularPlanner(PlanCtx planCtx) {
+  private boolean shouldFallbackToRegularPlanner(PlanCtx planCtx, Exception e) {
     // TODO: Need a fallback flag for various modes. In production, we will most
     // likely want to fallback to the original planner, but in testing, we might want
     // the query to fail.
     // There are some cases where we will always want to fallback, e.g. if the statement
     // fails at parse time because it is not a select statement.
+    if (e instanceof UnsupportedFeatureException) {
+      return true;
+    }
     TQueryCtx queryCtx = planCtx.getQueryContext();
     try {
       return !(Parser.parse(queryCtx.client_request.stmt,
           queryCtx.client_request.query_options) instanceof QueryStmt);
-    } catch (Exception e) {
+    } catch (Exception f) {
       return false;
     }
   }
@@ -2834,9 +2852,12 @@ public class Frontend {
     }
   }
 
-  public static void addPlannerToProfile(String planner) {
+  public static void addPlannerToProfile(String planner, String exceptionClass) {
     TRuntimeProfileNode profile = createTRuntimeProfileNode(PLANNER_PROFILE);
     addInfoString(profile, PLANNER_TYPE, planner);
+    if (exceptionClass != null) {
+      addInfoString(profile, CALCITE_FAILURE_REASON, exceptionClass);
+    }
     FrontendProfile.getCurrent().addChildrenProfile(profile);
   }
 
@@ -3077,11 +3098,17 @@ public class Frontend {
         result.setAdmin_request(analysisResult.getAdminFnStmt().toThrift());
         return result;
       } else if (analysisResult.isConvertTableToIcebergStmt()) {
-        result.stmt_type = TStmtType.CONVERT;
         result.setResult_set_metadata(new TResultSetMetadata(
             Collections.singletonList(new TColumn("summary", Type.STRING.toThrift()))));
-        result.setConvert_table_request(
-            analysisResult.getConvertTableToIcebergStmt().toThrift());
+        ConvertTableToIcebergStmt stmt = analysisResult.getConvertTableToIcebergStmt();
+        if (stmt.isNoOp()) {
+          result.setStmt_type(TStmtType.NO_OP);
+          result.setNoop_result(stmt.getNoopSummary());
+        } else {
+          result.setStmt_type(TStmtType.CONVERT);
+          result.setConvert_table_request(
+              analysisResult.getConvertTableToIcebergStmt().toThrift());
+        }
         return result;
       } else if (analysisResult.isTestCaseStmt()) {
         CopyTestCaseStmt testCaseStmt = ((CopyTestCaseStmt) analysisResult.getStmt());
@@ -3463,10 +3490,13 @@ public class Frontend {
     if (table instanceof FeShowFileStmtSupport) {
       return ((FeShowFileStmtSupport) table).doGetTableFiles(request);
     } else if (table instanceof FeFsTable) {
-      return FeFsTable.Utils.getFiles((FeFsTable)table, request.getPartition_set());
+      List<String> icebergFiles =
+          request.isSetSelected_files() ? request.getSelected_files() : null;
+      return FeFsTable.Utils.getFiles(
+          (FeFsTable) table, request.getPartition_set(), icebergFiles);
     } else {
-      throw new InternalException("SHOW FILES only supports Hdfs table. " +
-          "Unsupported table class: " + table.getClass());
+      throw new InternalException("SHOW FILES only supports Hdfs and Iceberg tables. "
+          + "Unsupported table class: " + table.getClass());
     }
   }
 
@@ -3767,5 +3797,21 @@ public class Frontend {
       }
     }
     return null;
+  }
+
+  public String getShowCreateTable(
+      TTableName tname, boolean withStats, int partitionLimit) throws ImpalaException {
+    Frontend.RetryTracker retries = new Frontend.RetryTracker(
+        String.format("show create table %s.%s", tname.db_name, tname.table_name));
+    while (true) {
+      try {
+        FeTable table = getCatalog().getTable(tname.getDb_name(), tname.getTable_name());
+        if (withStats) {
+          return ToSqlUtils.getCreateTableWithStatsSql(table, partitionLimit);
+        } else {
+          return ToSqlUtils.getCreateTableSql(table);
+        }
+      } catch (InconsistentMetadataFetchException e) { retries.handleRetryOrThrow(e); }
+    }
   }
 }

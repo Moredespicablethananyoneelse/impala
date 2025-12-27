@@ -77,8 +77,10 @@ struct TScalarType {
 struct TStructField {
   1: required string name
   2: optional string comment
-  // Valid for Iceberg tables
+  // Valid for Iceberg and Paimon tables.
   3: optional i32 field_id
+  // Valid for paimon tables.
+  4: optional bool is_nullable
 }
 
 struct TTypeNode {
@@ -113,6 +115,7 @@ enum TStmtType {
   CONVERT = 8
   UNKNOWN = 9
   KILL = 10
+  NO_OP = 11
 }
 
 enum TIcebergOperation {

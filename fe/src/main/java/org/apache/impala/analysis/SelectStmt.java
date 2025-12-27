@@ -1552,16 +1552,21 @@ public class SelectStmt extends QueryStmt {
 
   private void optimizePlainCountStarQueryV2(TableRef tableRef, FeIcebergTable table)
       throws AnalysisException {
+    boolean alreadyOptimized = false;
     for (SelectListItem selectItem : getSelectList().getItems()) {
       Expr expr = selectItem.getExpr();
       if (expr == null) return;
       if (expr.isConstant()) continue;
+      if (expr instanceof IcebergV2CountStarAccumulator) {
+        alreadyOptimized = true;
+        continue;
+      }
       if (!FunctionCallExpr.isCountStarFunctionCallExpr(expr)) return;
     }
     long num = Utils.getRecordCountV2(table, tableRef.getTimeTravelSpec());
     if (num > 0) {
-      analyzer_.getQueryCtx().setOptimize_count_star_for_iceberg_v2(true);
-      analyzer_.setTotalRecordsNumV2(num);
+      tableRef.setOptimizeCountStarForIcebergV2(true);
+      if (!alreadyOptimized) analyzer_.setTotalRecordsNumV2(num);
     }
   }
 
@@ -1914,5 +1919,10 @@ public class SelectStmt extends QueryStmt {
           (havingPred_ != null && havingPred_.contains(Expr.IS_AGGREGATE)) ||
           (sortInfo_ != null &&
            TreeNode.contains(sortInfo_.getSortExprs(), Expr.IS_AGGREGATE));
+  }
+
+  @Override
+  public boolean canSpoolResult() {
+    return !returnsAtMostOneRow();
   }
 }

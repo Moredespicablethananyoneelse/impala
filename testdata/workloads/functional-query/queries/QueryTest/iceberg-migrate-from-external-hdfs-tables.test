@@ -78,6 +78,11 @@ alter table parquet_partitioned convert to iceberg tblproperties('iceberg.catalo
 'Table has been migrated.'
 ====
 ---- QUERY
+alter table parquet_partitioned convert to iceberg tblproperties('iceberg.catalog' = 'hadoop.tables');
+---- RESULTS
+'Table has already been migrated.'
+====
+---- QUERY
 select count(*) from parquet_partitioned;
 ---- RESULTS
 7301
@@ -90,6 +95,7 @@ aggregation(SUM, NumRowGroups): 0
 describe formatted parquet_partitioned;
 ---- RESULTS: VERIFY_IS_SUBSET
 'Location:           ','$NAMENODE/test-warehouse/$DATABASE.db/parquet_partitioned','NULL'
+'','format-version      ','$ICEBERG_DEFAULT_FORMAT_VERSION                   '
 '','iceberg.catalog     ','hadoop.tables       '
 '','external.table.purge','true                '
 '','storage_handler     ','org.apache.iceberg.mr.hive.HiveIcebergStorageHandler'
@@ -177,6 +183,7 @@ describe formatted parquet_nopartitioned;
 ---- RESULTS: VERIFY_IS_SUBSET
 'Location:           ','$NAMENODE/test-warehouse/$DATABASE.db/parquet_nopartitioned','NULL'
 row_regex: '','metadata_location   ','$NAMENODE/test-warehouse/$DATABASE.db/parquet_nopartitioned/metadata/.*.metadata.json'
+'','format-version      ','$ICEBERG_DEFAULT_FORMAT_VERSION                   '
 '','external.table.purge','true                '
 '','storage_handler     ','org.apache.iceberg.mr.hive.HiveIcebergStorageHandler'
 '','write.format.default','parquet             '
@@ -237,6 +244,7 @@ describe formatted decimal_tbl;
 ---- RESULTS: VERIFY_IS_SUBSET
 'Location:           ','$NAMENODE/test-warehouse/$DATABASE.db/decimal_tbl','NULL'
 row_regex: '','metadata_location   ','$NAMENODE/test-warehouse/$DATABASE.db/decimal_tbl/metadata/.*.metadata.json'
+'','format-version      ','$ICEBERG_DEFAULT_FORMAT_VERSION                   '
 '','external.table.purge','true                '
 '','storage_handler     ','org.apache.iceberg.mr.hive.HiveIcebergStorageHandler'
 '','write.format.default','parquet             '
@@ -281,6 +289,7 @@ describe formatted table_at_random_location;
 ---- RESULTS: VERIFY_IS_SUBSET
 'Location:           ','$NAMENODE/test-warehouse/$DATABASE.db/random_location','NULL'
 row_regex: '','metadata_location   ','$NAMENODE/test-warehouse/$DATABASE.db/random_location/metadata/.*.metadata.json'
+'','format-version      ','$ICEBERG_DEFAULT_FORMAT_VERSION                   '
 '','external.table.purge','true                '
 '','storage_handler     ','org.apache.iceberg.mr.hive.HiveIcebergStorageHandler'
 '','write.format.default','parquet             '
@@ -300,11 +309,25 @@ select * from table_at_random_location;
 int, string
 ====
 ---- QUERY
-# Currently not feasible to convert directly into a V2 Iceberg table.
-create table converted_into_v2 (i int) partitioned by (s string) stored as parquet;
-alter table converted_into_v2 convert to iceberg tblproperties ('format-version'='2');
+# Convert to non-default format-version 1, it should work.
+create table converted_into_v1 (i int) partitioned by (s string) stored as parquet;
+alter table converted_into_v1 convert to iceberg tblproperties ('format-version'='1');
+---- RESULTS
+'Table has been migrated.'
+====
+---- QUERY
+describe formatted converted_into_v1;
+---- RESULTS: VERIFY_IS_SUBSET
+'','format-version      ','1                   '
+---- TYPES
+string, string, string
+====
+---- QUERY
+# Currently not feasible to convert directly into a V3 Iceberg table.
+create table converted_into_v3 (i int) partitioned by (s string) stored as parquet;
+alter table converted_into_v3 convert to iceberg tblproperties ('format-version'='3');
 ---- CATCH
-AnalysisException: CONVERT TO ICEBERG only accepts 'iceberg.catalog' as TBLPROPERTY.
+AnalysisException: Unsupported Iceberg format version '3'.
 ====
 ---- QUERY
 create table simple_tbl (i int) stored as parquet;
