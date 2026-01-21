@@ -287,12 +287,12 @@ void CodegenReadingStringOrCollectionVal(LlvmCodeGen* codegen, LlvmBuilder* buil
         IRFunction::STRING_VALUE_LEN, false);
 
     *ptr = builder->CreateCall(str_ptr_fn,
-        llvm::ArrayRef<llvm::Value*>({val_ptr}), "ptr");
+        llvm::ArrayRef<llvm::Value*>({val_ptr}), "ptr");// StringValue结构比较复杂（包含SSO优化等），所以调用了StringValue的成员函数
     *len = builder->CreateCall(str_len_fn,
         llvm::ArrayRef<llvm::Value*>({val_ptr}), "len");
   } else if (type.IsCollectionType()) {
     llvm::Value* ptr_ptr = builder->CreateStructGEP(nullptr, val_ptr, 0, "ptr_ptr");
-    *ptr = builder->CreateLoad(ptr_ptr, "ptr");
+    *ptr = builder->CreateLoad(ptr_ptr, "ptr"); // 由基本类型构成，不需要调用CollectionType的成员函数
     llvm::Value* len_ptr = builder->CreateStructGEP(nullptr, val_ptr, 1, "len_ptr");
     *len = builder->CreateLoad(len_ptr, "len");
   } else {

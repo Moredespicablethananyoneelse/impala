@@ -273,10 +273,10 @@ void* ScalarExprEvaluator::GetValue(const TupleRow* row) {
 void* ScalarExprEvaluator::GetValue(const ScalarExpr& expr, const TupleRow* row) {
   switch (expr.type_.type) {
     case TYPE_BOOLEAN: {
-      impala_udf::BooleanVal v = expr.GetBooleanVal(this, row);
+      impala_udf::BooleanVal v = expr.GetBooleanVal(this, row); // 说明了ScalarExpr的返回值是*Val类型
       if (v.is_null) return nullptr;
       result_.bool_val = v.val;
-      return &result_.bool_val;
+      return &result_.bool_val;    // result类型为ExprValue，内部直接存储apache impala定义的存储在tuple中的类型，比如Decimal4Value,Decimal8Value等等，所以是在此处完成了DecimalVal到DecimalValue的类型转换
     }
     case TYPE_TINYINT: {
       impala_udf::TinyIntVal v = expr.GetTinyIntVal(this, row);

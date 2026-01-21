@@ -1,3 +1,65 @@
+konglinglei@LAPTOP-0799F40N:~/source/impala$
+konglinglei@LAPTOP-0799F40N:~/source/impala$ grep '= "struct.impala' -r .
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_ANYVAL_NAME       = "struct.impala_udf::AnyVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_BOOLEANVAL_NAME   = "struct.impala_udf::BooleanVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_TINYINTVAL_NAME   = "struct.impala_udf::TinyIntVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_SMALLINTVAL_NAME  = "struct.impala_udf::SmallIntVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_INTVAL_NAME       = "struct.impala_udf::IntVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_BIGINTVAL_NAME    = "struct.impala_udf::BigIntVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_FLOATVAL_NAME     = "struct.impala_udf::FloatVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_DOUBLEVAL_NAME    = "struct.impala_udf::DoubleVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_STRINGVAL_NAME = "struct.impala_udf::StringVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_TIMESTAMPVAL_NAME = "struct.impala_udf::TimestampVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_DECIMALVAL_NAME   = "struct.impala_udf::DecimalVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_DATEVAL_NAME      = "struct.impala_udf::DateVal";
+./be/src/codegen/codegen-anyval.cc:const char* CodegenAnyVal::LLVM_COLLECTIONVAL_NAME = "struct.impala_udf::CollectionVal";
+./be/src/exec/hdfs-scanner.cc:const char* FieldLocation::LLVM_CLASS_NAME = "struct.impala::FieldLocation";
+./be/src/exec/filter-context.cc:const char* FilterContext::LLVM_CLASS_NAME = "struct.impala::FilterContext";
+./be/src/runtime/descriptors.cc:const char* NullIndicatorOffset::LLVM_CLASS_NAME = "struct.impala::NullIndicatorOffset";
+./be/src/runtime/types.cc:const char* ColumnType::LLVM_CLASS_NAME = "struct.impala::ColumnType";
+./be/src/runtime/tuple.cc:const char* Tuple::CodegenTypes::LLVM_CLASS_NAME = "struct.impala::Tuple::CodegenTypes";
+./be/src/runtime/tuple.cc:const char* SlotOffsets::LLVM_CLASS_NAME = "struct.impala::SlotOffsets";
+./be/src/runtime/collection-value.cc:const char* CollectionValue::LLVM_CLASS_NAME = "struct.impala::CollectionValue";
+./be/src/util/avro-util.cc:const char* AvroSchemaElement::LLVM_CLASS_NAME = "struct.impala::AvroSchemaElement";
+konglinglei@LAPTOP-0799F40N:~/source/impala$
+konglinglei@LAPTOP-0799F40N:~/source/impala$
+konglinglei@LAPTOP-0799F40N:~/source/impala$
+konglinglei@LAPTOP-0799F40N:~/source/impala$ grep '= "class.impala' -r .
+./be/src/common/status.cc:const char* Status::LLVM_CLASS_NAME = "class.impala::Status";
+./be/src/exec/text/hdfs-text-scanner.cc:const char* HdfsTextScanner::LLVM_CLASS_NAME = "class.impala::HdfsTextScanner";
+./be/src/exec/hdfs-scanner.cc:const char* HdfsScanner::LLVM_CLASS_NAME = "class.impala::HdfsScanner";
+./be/src/exec/blocking-join-node.cc:const char* BlockingJoinNode::LLVM_CLASS_NAME = "class.impala::BlockingJoinNode";
+./be/src/exec/aggregator.cc:const char* Aggregator::LLVM_CLASS_NAME = "class.impala::Aggregator";
+./be/src/exec/avro/hdfs-avro-scanner.cc:const char* HdfsAvroScanner::LLVM_CLASS_NAME = "class.impala::HdfsAvroScanner";
+./be/src/exec/hash-table.cc:const char* HashTableCtx::LLVM_CLASS_NAME = "class.impala::HashTableCtx";
+./be/src/exec/hdfs-columnar-scanner.cc:const char* HdfsColumnarScanner::LLVM_CLASS_NAME = "class.impala::HdfsColumnarScanner";
+./be/src/exec/partitioned-hash-join-builder.cc:const char* PhjBuilder::LLVM_CLASS_NAME = "class.impala::PhjBuilder";
+./be/src/exprs/expr.cc:const char* Expr::LLVM_CLASS_NAME = "class.impala::Expr";
+./be/src/exprs/scalar-expr.cc:const char* ScalarExpr::LLVM_CLASS_NAME = "class.impala::ScalarExpr";
+./be/src/exprs/agg-fn-evaluator.cc:const char* AggFnEvaluator::LLVM_CLASS_NAME = "class.impala::AggFnEvaluator";
+./be/src/exprs/is-not-empty-predicate.cc:const char* IsNotEmptyPredicate::LLVM_CLASS_NAME = "class.impala::IsNotEmptyPredicate";
+./be/src/exprs/valid-tuple-id.cc:const char* ValidTupleIdExpr::LLVM_CLASS_NAME = "class.impala::ValidTupleIdExpr";
+./be/src/exprs/null-literal.cc:const char* NullLiteral::LLVM_CLASS_NAME = "class.impala::NullLiteral";
+./be/src/exprs/scalar-expr-evaluator.cc:const char* ScalarExprEvaluator::LLVM_CLASS_NAME = "class.impala::ScalarExprEvaluator";
+./be/src/exprs/slot-ref.cc:const char* SlotRef::LLVM_CLASS_NAME = "class.impala::SlotRef";
+./be/src/runtime/string-value.cc:const char* StringValue::LLVM_CLASS_NAME = "class.impala::StringValue";
+./be/src/runtime/sorter.cc:const char* Sorter::TupleSorter::LLVM_CLASS_NAME = "class.impala::Sorter::TupleSorter";
+./be/src/runtime/tuple-row.cc:const char* TupleRow::LLVM_CLASS_NAME = "class.impala::TupleRow";
+./be/src/runtime/descriptors.cc:const char* TupleDescriptor::LLVM_CLASS_NAME = "class.impala::TupleDescriptor";
+./be/src/runtime/krpc-data-stream-sender.cc:const char* KrpcDataStreamSender::LLVM_CLASS_NAME = "class.impala::KrpcDataStreamSender";
+./be/src/runtime/mem-pool.cc:const char* MemPool::LLVM_CLASS_NAME = "class.impala::MemPool";
+./be/src/runtime/tuple.cc:const char* Tuple::LLVM_CLASS_NAME = "class.impala::Tuple";
+./be/src/runtime/runtime-state.cc:const char* RuntimeState::LLVM_CLASS_NAME = "class.impala::RuntimeState";
+./be/src/runtime/runtime-filter.cc:const char* RuntimeFilter::LLVM_CLASS_NAME = "class.impala::RuntimeFilter";
+./be/src/runtime/sorted-run-merger.cc:const char* SortedRunMerger::LLVM_CLASS_NAME = "class.impala::SortedRunMerger";
+./be/src/runtime/timestamp-value.cc:const char* TimestampValue::LLVM_CLASS_NAME = "class.impala::TimestampValue";
+./be/src/util/min-max-filter.cc:const char* MinMaxFilter::LLVM_CLASS_NAME = "class.impala::MinMaxFilter";
+./be/src/util/min-max-filter.cc:const char* StringMinMaxFilter::LLVM_CLASS_NAME = "class.impala::StringMinMaxFilter";
+./be/src/util/min-max-filter.cc:const char* DecimalMinMaxFilter::LLVM_CLASS_NAME = "class.impala::DecimalMinMaxFilter";
+./be/src/util/tuple-row-compare.cc:const char* TupleRowComparator::LLVM_CLASS_NAME = "class.impala::TupleRowComparator";
+konglinglei@LAPTOP-0799F40N:~/source/impala$
+
+**********************************************************************************************************************
 你提供的这两段代码是 Apache Impala 项目中用于 LLVM IR（Intermediate Representation）交叉编译的核心机制 的关键组成部分。下面我将结合你之前的问题（关于 LlvmCodeGen 和 CMake 编译流程），系统性地解释这两段代码的作用、设计原理及其在整个 Codegen 架构中的位置。
 
 🧩 一、整体目标回顾

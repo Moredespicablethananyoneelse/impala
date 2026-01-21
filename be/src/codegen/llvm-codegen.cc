@@ -206,7 +206,7 @@ Status LlvmCodeGen::InitializeLlvm(const char* procname, bool load_backend) {
 
   // Initialize the global shared call graph.
   shared_call_graph_.Init(init_codegen->module_);
-  init_codegen->Close();
+  init_codegen->Close();    // CreateImpalaCodegen没有关闭生成的codegen 
   return Status::OK();
 }
 
@@ -1117,7 +1117,7 @@ llvm::Function* LlvmCodeGen::FinalizeFunction(llvm::Function* function) {
 }
 
 Status LlvmCodeGen::MaterializeModule() {
-  llvm::Error err = module_->materializeAll();
+  llvm::Error err = module_->materializeAll();  // Make sure all GlobalValues in this Module are fully read and clear the Materializer.
   if (UNLIKELY(err)) {
     string err_string;
     llvm::handleAllErrors(
@@ -1281,7 +1281,7 @@ Status LlvmCodeGen::FinalizeModule(string* module_id) {
   if (!non_finalized_fns_str.empty()) {
     LOG(INFO) << "For query " << PrintId(state_->query_id())
               << " the following functions were not finalized and have been removed from "
-                 "the module:\n"
+                 "the module:\n"                 
               << non_finalized_fns_str;
   }
 

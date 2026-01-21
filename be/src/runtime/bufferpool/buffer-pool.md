@@ -1,4 +1,5 @@
-
+[FreePool](../../../src/runtime/free-pool.md)
+********************************************
 # BufferPool::Client
 [BufferPool::Client/BufferPool::Page](./buffer-pool-internal.md)
 *****************************************************************************

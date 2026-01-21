@@ -132,7 +132,7 @@ class RawValue {
   template <bool COLLECT_VAR_LEN_VALS>
   static void Write(const void* value, Tuple* tuple, const SlotDescriptor* slot_desc,
       MemPool* pool, std::vector<StringValue*>* string_values,
-      std::vector<std::pair<CollectionValue*, int64_t>>* collection_values);
+      std::vector<std::pair<CollectionValue*, int64_t>>* collection_values);   // called in be/src/runtime/tuple.cc
 
   /// Convenience wrapper for the templated version with COLLECT_VAR_LEN_VALS=false.
   static void Write(const void* value, Tuple* tuple, const SlotDescriptor* slot_desc,

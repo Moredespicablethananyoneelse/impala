@@ -1,3 +1,5 @@
+[be/src/codegen/codegen-anyval.md](../../../be/src/codegen/codegen-anyval.md)
+*********************************************************************************************
 Apache Impala 的 UDF（User-Defined Function，用户自定义函数）设计思路体现了其对高性能、低延迟、与 C++ 生态兼容的 OLAP 查询引擎定位。Impala 本身是为 Hadoop 生态构建的 MPP（大规模并行处理）SQL 引擎，强调在不依赖 MapReduce 的情况下直接读取 Parquet/ORC 等列式格式进行快速分析。因此，其 UDF 设计也围绕以下核心目标展开：
 
 一、设计哲学

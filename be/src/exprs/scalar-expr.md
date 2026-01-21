@@ -1,3 +1,7 @@
+线头函数：Status ScalarExpr::Create(const TExpr& texpr, const RowDescriptor& row_desc,
+    FragmentState* state, ScalarExpr** scalar_expr) 由be/src/exec/exec-node.cc调用
+
+***************************************
 ScalarExpr 是 Apache Impala（一个开源的 MPP SQL 查询引擎）中用于表示标量表达式（scalar expression）的核心类。它的设计目标是高效地支持两种执行模式：
 解释执行（interpreted execution）
 代码生成（codegen，即 LLVM JIT 编译）

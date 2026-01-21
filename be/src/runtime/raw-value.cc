@@ -212,7 +212,7 @@ void RawValue::WriteNonNullPrimitive(const void* value, void* dst, const ColumnT
 }
 
 void RawValue::Write(const void* value, Tuple* tuple, const SlotDescriptor* slot_desc,
-    MemPool* pool) {
+    MemPool* pool) {   //将数据写入tuple， 在tuple.cc中调用be/src/runtime/tuple.cc
   RawValue::Write<false>(value, tuple, slot_desc, pool, nullptr, nullptr);
 }
 

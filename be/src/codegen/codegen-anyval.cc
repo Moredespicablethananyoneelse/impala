@@ -847,7 +847,7 @@ CodegenAnyVal CodegenAnyVal::GetNonNullVal(LlvmCodeGen* codegen, LlvmBuilder* bu
   llvm::Type* val_type = GetLoweredType(codegen, type);
   // All zeros => 'is_null' = false
   llvm::Value* value = llvm::Constant::getNullValue(val_type);
-  return CodegenAnyVal(codegen, builder, type, value, name);
+  return CodegenAnyVal(codegen, builder, type, value, name);  // 似乎传给CodegenAnyVal构造函数的value需要是lowered后的值
 }
 
 // Returns the last block generated so we can set it as a predecessor in PHI nodes.
@@ -927,7 +927,7 @@ llvm::BasicBlock* CodegenAnyVal::CreateStructValFromReadWriteInfo(
 }
 
 CodegenAnyVal CodegenAnyVal::CreateFromReadWriteInfo(
-    const CodegenAnyValReadWriteInfo& read_write_info) {
+    const CodegenAnyValReadWriteInfo& read_write_info) {  // looks like to used to create a CodegenAnyVal from tuple（used in be/src/exprs/slot-ref.h)
   LlvmCodeGen* codegen = read_write_info.codegen();
   LlvmBuilder* builder = read_write_info.builder();
   const ColumnType& type = read_write_info.type();
@@ -1017,7 +1017,7 @@ CodegenAnyVal CodegenAnyVal::CreateFromReadWriteInfo(
   return result;
 }
 
-CodegenAnyValReadWriteInfo CodegenAnyVal::ToReadWriteInfo() {
+CodegenAnyValReadWriteInfo CodegenAnyVal::ToReadWriteInfo() {   // looks like to used to write a CodegenAnyVal to tuple（used in be/src/runtime/tuple.h）
   llvm::IRBuilderBase::InsertPoint ip = builder_->saveIP();
 
   llvm::LLVMContext& context = codegen_->context();
@@ -1145,7 +1145,7 @@ void CodegenAnyVal::StructChildToReadWriteInfo(
 
 void CodegenAnyVal::StructToReadWriteInfo(
     CodegenAnyValReadWriteInfo* read_write_info,
-    llvm::Value* children_ptr) {
+    llvm::Value* children_ptr) {  // 
   const ColumnType& type = read_write_info->type();
   DCHECK(type.IsStructType());
 

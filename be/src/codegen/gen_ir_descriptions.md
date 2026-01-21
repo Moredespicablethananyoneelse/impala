@@ -206,6 +206,18 @@ static struct {
 
 总结：这两个文件是 Impala 构建时自动生成的“函数注册表”，将人类可读的函数名与 LLVM IR 中的真实符号名关联起来，是 Impala 高效代码生成架构的重要一环。
 ****************************************************************
+llvm::Function* LlvmCodeGen::GetFunction(const string& symbol, bool clone) {
+  llvm::Function* fn = module_->getFunction(symbol.c_str());
+  if (fn == NULL) {
+    LOG(ERROR) << "Unable to locate function " << symbol;
+    return NULL;
+  }
+  Status status = MaterializeFunction(fn);
+  if (UNLIKELY(!status.ok())) return NULL;
+  if (clone) return CloneFunction(fn);
+  return fn;
+}
+
 [ LlvmCodeGen::GetFunction  llvm-codegen.cc](./llvm-codegen-cache.cc)
 以下是对你提供的这段 Impala 源码中 LlvmCodeGen::GetFunction 函数的详细解释，结合之前讨论的预交叉编译 IR 函数机制和生成的头文件。
 C++llvm::Function* LlvmCodeGen::GetFunction(IRFunction::Type ir_type, bool clone) {

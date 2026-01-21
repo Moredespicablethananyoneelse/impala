@@ -110,7 +110,7 @@ void Tuple::DeepCopyVarlenData(const TupleDescriptor& desc, MemPool* pool) {
     StringValue* string_v = GetStringSlot((*slot)->tuple_offset());
     // It is safe to smallify at this point as DeepCopyVarlenData is called on the new
     // tuple which can be modified.
-    if (string_v->Smallify()) continue;
+    if (string_v->Smallify()) continue;// 从调用关系可知string_v是Tuple* dst。此时dst的string_v可以将通过smallify函数src的string_v指向的内存的内容拷贝到dst中，因为他们刚刚完成浅拷贝，内部指向的内存是一样的
     char* string_copy = reinterpret_cast<char*>(pool->Allocate(string_v->Len()));
     Ubsan::MemCpy(string_copy, string_v->Ptr(), string_v->Len());
     string_v->SetPtr(string_copy);
@@ -276,7 +276,7 @@ void Tuple::MaterializeExprs(TupleRow* row, const TupleDescriptor& desc,
     // TODO: revisit this logic in the FE
     DCHECK(slot_desc->type().type == TYPE_NULL ||
         slot_desc->type() == evals[i]->root().type());
-    void* src = evals[i]->GetValue(row);
+    void* src = evals[i]->GetValue(row);  //interpret path
 
     const size_t old_num_string_values = COLLECT_VAR_LEN_VALS ?
         non_null_string_values->size() : 0;

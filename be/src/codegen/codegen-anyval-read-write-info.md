@@ -157,4 +157,120 @@ cpp
 未来：等待 IMPALA-11643 任务完成，以移除这个 hack 并提供完整的支持。
 **********************************************************************
 
+BasicBlock * llvm::BasicBlock::Create	(	LLVMContext &	Context,
+const Twine &	Name = "",
+Function *	Parent = nullptr,
+BasicBlock *	InsertBefore = nullptr )
+inlinestatic
+Creates a new BasicBlock.
+
+If the Parent parameter is specified, the basic block is automatically inserted at either the end of the function (if InsertBefore is 0), or before the specified basic block.
+*********************************************************
+[Descriptors](../src/runtime/descriptors.md)
+********************************************************8
+请解释下：  // The stored data is one of the variants below.
+  std::variant<
+      std::monostate, // Initial state - no value has been set
+      llvm::Value*,   // Simple native types
+      PtrLenStruct,   // String and collection types
+      TimestampStruct // Timestamp
+      > data_;
+### 核心概述
+这段代码定义了 `CodegenAnyValReadWriteInfo` 类的核心数据成员 `data_`，它使用 C++17 引入的 `std::variant`（类型安全联合体），**以类型安全、内存紧凑的方式存储 Impala 不同数据类型在 LLVM Codegen 阶段的内存表示**，避免了传统 C 风格联合体的类型不安全问题，同时精准适配 Impala 各类数据类型的 Codegen 处理需求。
+
+`std::variant` 的核心特性是：同一时间只能存储其备选类型列表中的**一种类型**，且编译期会检查类型访问的合法性，运行时可通过接口判断当前存储的类型，这对 Codegen 阶段的多类型数据传递至关重要。
+
+下面逐个拆解 `std::variant` 中每个备选类型的作用、对应场景及设计原因：
+
+---
+
+### 一、 各备选类型详细解析
+#### 1.  `std::monostate`：初始空状态（未设置任何值）
+-   **核心作用**：标记 `data_` 处于「未初始化状态」，即还未存储任何有效数据。
+-   **设计原因**：
+    -  `std::variant` 必须初始化其备选类型列表中的某一个类型，若没有 `std::monostate`，第一个备选类型（此处是 `llvm::Value*`）会被默认初始化（值为 `nullptr`），此时无法区分「主动设置了 `nullptr`」和「尚未初始化」两种状态。
+    -  `std::monostate` 是一种无意义的“空类型”，专门用于表示「数据未被赋值」的初始状态，是 `data_` 的默认初始化状态。
+-   **关联辅助函数**：类中的 `is_data_initialized()` 函数就是通过判断 `data_` 是否为 `std::monostate` 来确定数据是否已初始化：
+    ```cpp
+    bool CodegenAnyValReadWriteInfo::is_data_initialized() const {
+      // 若无法获取 std::monostate 指针，说明已存储其他有效类型（已初始化）
+      return std::get_if<std::monostate>(&data_) == nullptr;
+    }
+    ```
+
+#### 2.  `llvm::Value*`：简单原生基础类型（标量类型）
+-   **对应数据类型**：Impala 中的所有**简单原生基础类型**，包括 `BOOLEAN`、`TINYINT`、`SMALLINT`、`INT`、`BIGINT`、`FLOAT`、`DOUBLE`、`DECIMAL`、`DATE`。
+-   **核心作用**：存储这些基础类型在 LLVM IR 中的值抽象表示。
+-   **设计原因**：
+    -  这些基础类型在 LLVM IR 中对应简单标量类型（如 `i1`（布尔）、`i8`（TINYINT）、`i32`（INT）、`float`（FLOAT）、`double`（DOUBLE）等），`llvm::Value*` 是 LLVM IR 中所有值（标量、指针等）的基类抽象，直接存储该指针即可完整表示基础类型的数值，无需额外封装。
+    -  这类类型无需额外的长度或辅助信息，单个 `llvm::Value*` 即可满足存储需求，效率最高。
+-   **关联操作函数**：
+    -  `SetSimpleVal(llvm::Value* val)`：将基础类型的 LLVM 数值写入 `data_`。
+    -  `GetSimpleVal() const`：从 `data_` 中读取基础类型的 LLVM 数值（读取前会通过 `std::get_if<llvm::Value*>` 做类型校验，非法访问会触发 `DCHECK` 断言）。
+    -  `holds_simple_val() const`：判断 `data_` 当前是否存储的是 `llvm::Value*` 类型。
+
+#### 3.  `PtrLenStruct`：字符串类型 & 集合类型（变长类型）
+-   **对应数据类型**：Impala 中的变长类型，包括 `STRING`、`VARCHAR`（字符串类型），`ARRAY`、`MAP`（集合类型，Impala 中集合的内存布局与字符串类似，均需「指针+长度」描述）。
+-   **核心作用**：通过「指针+长度」的组合，完整描述变长类型的内存地址和有效数据范围。
+-   **`PtrLenStruct` 结构解析**：
+    ```cpp
+    struct PtrLenStruct {
+      llvm::Value* ptr = nullptr; // 指向数据的原生内存指针（LLVM IR 层面）
+      llvm::Value* len = nullptr; // 有效数据长度（字符串：字符个数；集合：项数）
+    };
+    ```
+-   **设计原因**：
+    -  变长类型无法用单个 `llvm::Value*` 表示：仅存指针无法知道数据边界，仅存长度无法找到数据位置，必须两者结合。
+    -  字符串类型：`ptr` 指向字符数组的起始地址，`len` 指向字符串的有效字符数（不含结束符），用于 Codegen 阶段的内存分配（`MemPool::Allocate`）和数据拷贝（`llvm::memcpy`）。
+    -  集合类型（ARRAY/MAP）：`ptr` 指向集合项元组的起始地址，`len` 指向集合的项数（需结合子元组字节大小计算总内存大小），是 `CodegenWriteCollectionToSlot` 函数的核心输入参数。
+-   **关联操作函数**：
+    -  `SetPtrAndLen(llvm::Value* ptr, llvm::Value* len)`：写入变长类型的指针和长度。
+    -  `GetPtrAndLen() const`：读取指针和长度（带类型校验）。
+    -  `holds_ptr_and_len() const`：判断 `data_` 当前是否存储的是 `PtrLenStruct` 类型。
+
+#### 4.  `TimestampStruct`：时间戳类型（特殊复合类型）
+-   **对应数据类型**：Impala 中的 `TIMESTAMP` 类型（时间戳）。
+-   **核心作用**：存储时间戳的两个核心组成部分，适配 Impala 时间戳的原生内存布局。
+-   **`TimestampStruct` 结构解析**：
+    ```cpp
+    struct TimestampStruct {
+      llvm::Value* time_of_day = nullptr; // 一天内的时间偏移（微秒数，LLVM i64 类型）
+      llvm::Value* date = nullptr;        // 日期偏移（距离基准日期的天数，LLVM i32 类型）
+    };
+    ```
+-   **设计原因**：
+    -  `TIMESTAMP` 是 Impala 中的特殊类型，既不是简单标量（无法用 `llvm::Value*` 直接表示），也不是变长类型（无需「指针+长度」），其原生内存布局（`TimestampValue`）是由「日期+当日时间」组成的复合结构。
+    -  Codegen 阶段需要拆分这两个字段进行存储和转换（如 `CodegenToTimestampValue` 函数会将这两个字段组装为 `TimestampValue` 结构体），因此需要单独封装 `TimestampStruct` 来存储这两个核心字段。
+-   **关联操作函数**：
+    -  `SetTimeAndDate(llvm::Value* time_of_day, llvm::Value* date)`：写入时间戳的两个核心字段。
+    -  `GetTimeAndDate() const`：读取两个核心字段（带类型校验）。
+    -  `holds_timestamp() const`：判断 `data_` 当前是否存储的是 `TimestampStruct` 类型。
+
+---
+
+### 二、 关键设计亮点
+1.  **类型安全**：
+    与 C 风格联合体不同，`std::variant` 会在**编译期检查类型赋值的合法性**，在运行时通过 `std::get_if`（或类中的 `holds_xxx` 函数）判断类型，非法类型访问会触发 `DCHECK` 断言（如用 `GetSimpleVal` 读取 `PtrLenStruct` 类型会直接报错），避免了内存越界或类型混乱问题。
+
+2.  **内存紧凑**：
+    `std::variant` 的内存大小等于其最大备选类型的大小（加上少量类型标记开销，可忽略），比单独定义多个成员变量（如 `llvm::Value* simple_val; PtrLenStruct ptr_len; ...`）更节省内存，符合 Codegen 阶段对内存效率的要求。
+
+3.  **精准适配 Impala 类型体系**：
+    四个备选类型恰好对应 Impala Codegen 阶段的四种数据形态（未初始化、基础标量、变长/集合、时间戳），与之前梳理的 `CodegenStoreNonNullAnyVal`、`CodegenWriteStringToSlot` 等函数的类型分工完全一致，是 Impala Codegen 阶段「源-目标」数据传递的核心载体。
+
+4.  **操作规范化**：
+    每种备选类型都有专属的 `SetXXX`（写入）和 `GetXXX`（读取）函数，避免了直接操作 `data_` 导致的混乱，同时在函数内做了严格的非空校验（`DCHECK`），保证了数据的有效性。
+
+---
+
+### 三、 总结
+`data_` 作为 `CodegenAnyValReadWriteInfo` 类的核心数据成员，通过 `std::variant` 实现了：
+1.  类型安全的多类型数据存储，适配 Impala 所有核心数据类型的 Codegen 表示；
+2.  内存紧凑，兼顾效率与功能性；
+3.  状态清晰，通过 `std::monostate` 区分「未初始化」和「已赋值」状态；
+4.  操作规范，通过专属 Setter/Getter 函数保证数据读写的合法性。
+
+它是 Impala Codegen 阶段实现「不同类型数据在源（如 `SlotRef`）和目标（如 Tuple 写入）之间传递」的关键基础，与各类 Codegen 写入函数（`CodegenStoreNonNullAnyVal` 等）紧密协作，支撑起 Impala 完整的 Codegen 类型处理体系。
+******************************************************************************8
+
 
