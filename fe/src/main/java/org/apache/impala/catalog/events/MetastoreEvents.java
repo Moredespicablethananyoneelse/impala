@@ -1534,6 +1534,8 @@ public class MetastoreEvents {
                   .getCount());
           return true;
         }
+        DebugUtils.executeDebugAction(BackendConfig.INSTANCE.debugActions(),
+            DebugUtils.IS_OLDER_EVENT_CHECK_DELAY);
         // Always check the lastRefreshEventId on the table first for table level refresh
         boolean canSkip = tbl.getLastRefreshEventId() >= getEventId();
         try {
@@ -2315,15 +2317,55 @@ public class MetastoreEvents {
       Preconditions.checkNotNull(afterSd, "afterSd is null");
       StorageDescriptor previousSD = normalizeStorageDescriptor(beforeSd.deepCopy());
       StorageDescriptor currentSD = normalizeStorageDescriptor(afterSd.deepCopy());
-      if (!Objects.equals(previousSD, currentSD)) {
-        infoLog("Non-trivial change in table storage descriptor (SD) detected for " +
-            "table {}.{}. So file metadata should be reloaded. SD before: {}, SD " +
-            "after: {}", dbName_, tblName_, beforeSd.toString(), afterSd.toString());
-        return false;
+      if (Objects.equals(previousSD, currentSD)) {
+        infoLog("Ignored trivial changes in table storage descriptor (SD) of table " +
+            "{}.{}.", dbName_, tblName_);
+        return true;
       }
-      infoLog("Trivial changes in table storage descriptor (SD) detected for table " +
-          "{}.{}. So file metadata reload can be skipped.", dbName_, tblName_);
-      return true;
+      boolean foundChange = false;
+      if (!Objects.equals(previousSD.getLocation(), currentSD.getLocation())) {
+        foundChange = true;
+        infoLog("Location changed from '{}' to '{}'",
+        previousSD.getLocation(), currentSD.getLocation());
+      }
+      if (!Objects.equals(previousSD.getInputFormat(), currentSD.getInputFormat())) {
+        foundChange = true;
+        infoLog("InputFormat changed from '{}' to '{}'",
+            previousSD.getInputFormat(), currentSD.getInputFormat());
+      }
+      if (!Objects.equals(previousSD.getOutputFormat(), currentSD.getOutputFormat())) {
+        foundChange = true;
+        infoLog("OutputFormat changed from '{}' to '{}'",
+            previousSD.getOutputFormat(), currentSD.getOutputFormat());
+      }
+      if (!Objects.equals(previousSD.getSerdeInfo(), currentSD.getSerdeInfo())) {
+        foundChange = true;
+        infoLog("SerdeInfo changed from '{}' to '{}'",
+            previousSD.getSerdeInfo(), currentSD.getSerdeInfo());
+      }
+      // normalizeStorageDescriptor() makes sure storedAsSubDirectories is set.
+      if (previousSD.isStoredAsSubDirectories() != currentSD.isStoredAsSubDirectories()) {
+        foundChange = true;
+        infoLog("StoredAsSubDirectories changed from '{}' to '{}'",
+            previousSD.isStoredAsSubDirectories(), currentSD.isStoredAsSubDirectories());
+      }
+      if (!Objects.equals(previousSD.getParameters(), currentSD.getParameters())) {
+        foundChange = true;
+        infoLog("Parameters changed from '{}' to '{}'",
+            previousSD.getParameters(), currentSD.getParameters());
+      }
+      if (foundChange) {
+        infoLog("Non-trivial change in table storage descriptor (SD) detected for " +
+            "table {}.{}. So file metadata should be reloaded.", dbName_, tblName_);
+      } else {
+        // New hive versions might add new fields to StorageDescriptor that we don't
+        // normalize or miss in above checks. So we log the full SD objects here.
+        infoLog("Non-trivial change in table storage descriptor (SD) detected for " +
+            "table {}.{}. So file metadata should be reloaded. SD before: " +
+            "{}, SD after: {}",
+            dbName_, tblName_, beforeSd.toString(), afterSd.toString());
+      }
+      return false;
     }
 
     /**
@@ -2342,6 +2384,9 @@ public class MetastoreEvents {
       // this value to false if it is null.
       if (!sd.isSetStoredAsSubDirectories()) {
         sd.setStoredAsSubDirectories(false);
+      }
+      if (sd.isSetParameters() && sd.getParameters().isEmpty()) {
+        sd.unsetParameters();
       }
       return sd;
     }
@@ -3237,6 +3282,7 @@ public class MetastoreEvents {
       List<Long> eventIds = new ArrayList<>();
       // We treat insert event as a special case since the self-event context for an
       // insert event is generated differently using the eventIds.
+      boolean isReloadEvent = baseEvent_ instanceof ReloadEvent;
       boolean isInsertEvent = baseEvent_ instanceof InsertEvent;
       for (T event : batchedEvents_) {
         partitionKeyValues.add(
@@ -3245,7 +3291,8 @@ public class MetastoreEvents {
         eventIds.add(event.getEventId());
       }
       return new SelfEventContext(dbName_, tblName_, partitionKeyValues,
-          baseEvent_.getPartitionForBatching().getParameters(),
+          isReloadEvent ? msTbl_.getParameters() :
+              baseEvent_.getPartitionForBatching().getParameters(),
           isInsertEvent ? eventIds : null);
     }
   }
@@ -3440,12 +3487,21 @@ public class MetastoreEvents {
 
     @Override
     public SelfEventContext getSelfEventContext() {
-      throw new UnsupportedOperationException("Self-event evaluation is unnecessary for"
-          + " this event type");
+      if (reloadPartition_ == null) {
+        return new SelfEventContext(msTbl_.getDbName(), msTbl_.getTableName(),
+            msTbl_.getParameters());
+      }
+      return new SelfEventContext(msTbl_.getDbName(), msTbl_.getTableName(),
+          Arrays.asList(getTPartitionSpecFromHmsPartition(msTbl_, reloadPartition_)),
+          msTbl_.getParameters());
     }
 
     @Override
     public void processTableEvent() throws MetastoreNotificationException {
+      if (isSelfEvent()) {
+        infoLog("Not processing the event as it is a self-event");
+        return;
+      }
       if (isOlderEvent()) {
         metrics_.getCounter(MetastoreEventsProcessor.EVENTS_SKIPPED_METRIC)
             .inc(getNumberOfEvents());

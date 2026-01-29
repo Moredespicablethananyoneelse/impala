@@ -18,25 +18,34 @@
 package org.apache.impala.customcluster;
 
 import static org.apache.impala.testutil.LdapUtil.*;
+import static org.apache.impala.testutil.TestUtils.retryUntilSuccess;
+import static org.apache.impala.testutil.TestUtils.writeCookieSecret;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.collect.Range;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.directory.server.annotations.CreateLdapServer;
 import org.apache.directory.server.annotations.CreateTransport;
 import org.apache.directory.server.core.annotations.ApplyLdifFiles;
 import org.apache.directory.server.core.integ.CreateLdapServerRule;
+import org.apache.impala.testutil.InterruptibleProxyServer;
 import org.apache.impala.testutil.WebClient;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.ClassRule;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Impala shell connectivity tests for LDAP authentication. This class contains the common
@@ -46,8 +55,13 @@ import org.junit.ClassRule;
     transports = { @CreateTransport(protocol = "LDAP", address = "localhost") })
 @ApplyLdifFiles({"users.ldif"})
 public class LdapImpalaShellTest {
+  private final static Logger LOG = LoggerFactory.getLogger(LdapImpalaShellTest.class);
+
   @ClassRule
   public static CreateLdapServerRule serverRule = new CreateLdapServerRule();
+
+  @Rule
+  public TemporaryFolder tempFolder = new TemporaryFolder();
 
   // The cluster will be set up to allow TEST_USER_1 to act as a proxy for delegateUser_.
   // Includes a special character to test HTTP path encoding.
@@ -102,15 +116,19 @@ public class LdapImpalaShellTest {
     return protocolsToTest;
   }
 
+  protected String authMethod() {
+    return "basic";
+  }
+
   private void verifyMetrics(Range<Long> expectedBasicSuccess,
       Range<Long> expectedBasicFailure, Range<Long> expectedCookieSuccess,
       Range<Long> expectedCookieFailure) throws Exception {
-    long actualBasicSuccess = (long) client_.getMetric(
-        "impala.thrift-server.hiveserver2-http-frontend.total-basic-auth-success");
+    long actualBasicSuccess = (long) client_.getMetric("impala.thrift-server"
+        + ".hiveserver2-http-frontend.total-" + authMethod() + "-auth-success");
     assertTrue("Expected: " + expectedBasicSuccess + ", Actual: " + actualBasicSuccess,
         expectedBasicSuccess.contains(actualBasicSuccess));
-    long actualBasicFailure = (long) client_.getMetric(
-        "impala.thrift-server.hiveserver2-http-frontend.total-basic-auth-failure");
+    long actualBasicFailure = (long) client_.getMetric("impala.thrift-server"
+        + ".hiveserver2-http-frontend.total-" + authMethod() + "-auth-failure");
     assertTrue("Expected: " + expectedBasicFailure + ", Actual: " + actualBasicFailure,
         expectedBasicFailure.contains(actualBasicFailure));
 
@@ -280,6 +298,112 @@ public class LdapImpalaShellTest {
     command = buildCommand(
         query, "hs2-http", TEST_USER_1, TEST_PASSWORD_1, "/?doAs=" + delegateUser_);
     RunShellCommand.Run(command, /* shouldSucceed */ true, delegateUser_, "");
+  }
+
+  /**
+   * Used to configure and return a temporary cookie secret file. This is needed to set
+   * --cookie_secret_file=file.getCanonicalPath() and pass to testCookieRefreshImpl.
+   */
+  protected File getCookieSecretFile() throws Exception {
+    // Write a temporary key file for the cookie secret.
+    File keyFile = tempFolder.newFile();
+    writeCookieSecret(keyFile);
+    return keyFile;
+  }
+
+  /**
+   * Tests cookie rotation during a query does not interrupt the session.
+   */
+  protected void testCookieRefreshImpl(File keyFile, String[] env) throws Exception {
+    String query = "select sleep(3000)";
+    String[] command = ArrayUtils.add(
+        buildCommand(query, "hs2-http", TEST_USER_1, TEST_PASSWORD_1, "/cliservice"),
+        "--use_new_http_connection");
+
+    final RunShellCommand.Output[] resultHolder = new RunShellCommand.Output[1];
+    Thread thread = new Thread(() -> {
+      try {
+        resultHolder[0] = RunShellCommand.Run(command, env,
+            /* shouldSucceed */ true, /* sleep returns true */ "true",
+            "Starting Impala Shell with LDAP-based authentication");
+      } catch (Throwable e) {
+        resultHolder[0] = new RunShellCommand.Output("", e.getMessage());
+      }
+    });
+    thread.start();
+
+    // Poll the metric until authentication succeeds, then update the cookie secret file.
+    // Success can be seen from timing: client authenticates, key is updated, client
+    // continues and finishes the query. The relevant log lines are:
+    //   Loaded authentication key from ...
+    //   Opened session
+    //   Loaded authentication key from ...
+    //   Invalid cookie provided
+    //   Closed session
+    try {
+      retryUntilSuccess(() -> {
+        long success = (long) client_.getMetric("impala.thrift-server."
+            + "hiveserver2-http-frontend.total-" + authMethod() + "-auth-success");
+        if (success < 1L) throw new Exception("Authentication not yet succeeded.");
+        return null;
+      }, 20, 100);
+      writeCookieSecret(keyFile);
+      thread.join(5000);
+    } finally {
+      if (resultHolder[0] != null) LOG.info(resultHolder[0].stderr);
+    }
+
+    RunShellCommand.Output result = resultHolder[0];
+    assertTrue(result.stderr,
+        result.stderr.contains("Preserving cookies: impala.auth"));
+    assertTrue(result.stderr, result.stderr.contains("Fetched 1 row"));
+    // Cookie auth should fail once due to key change, requiring two basic auths.
+    // Cookie auth is expected to succeed at least once, possibly many times.
+    verifyMetrics(Range.closed(2L, 2L), zero, Range.atLeast(1L), one);
+  }
+
+  /**
+   * Tests that an interrupted connection reconnects.
+   */
+  protected void testReconnectImpl(String[] env) throws Exception {
+    // impala-shell now re-uses connections. Add an interruptible proxy to force new
+    // connections to be created.
+    final RunShellCommand.Output[] resultHolder = new RunShellCommand.Output[1];
+    try (InterruptibleProxyServer proxy =
+        new InterruptibleProxyServer("localhost", 28000)) {
+      proxy.start();
+
+      String query = "select sleep(3000)";
+      String[] command = ArrayUtils.add(
+          buildCommand(query, "hs2-http", TEST_USER_1, TEST_PASSWORD_1, "/cliservice"),
+          "--impalad=localhost:" + proxy.getLocalPort());
+
+      Thread thread = new Thread(() -> {
+        try {
+          resultHolder[0] = RunShellCommand.Run(command, env,
+              /* shouldSucceed */ true, /* sleep returns true */ "true",
+              "Starting Impala Shell with LDAP-based authentication");
+        } catch (Throwable e) {
+          resultHolder[0] = new RunShellCommand.Output("", e.getMessage());
+        }
+      });
+      thread.start();
+
+      // Wait until the query is started before closing the connection.
+      retryUntilSuccess(() -> {
+        long success = (long) client_.getMetric("impala-server.num-queries-registered");
+        if (success < 1L) throw new Exception("Query not yet registered.");
+        return null;
+      }, 20, 100);
+      proxy.closeConnections();
+      thread.join(5000);
+    } finally {
+      if (resultHolder[0] != null) LOG.info(resultHolder[0].stderr);
+    }
+
+    // Query should succeed.
+    RunShellCommand.Output result = resultHolder[0];
+    assertTrue(result.stderr, result.stderr.contains("Fetched 1 row"));
   }
 
   /**

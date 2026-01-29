@@ -66,6 +66,7 @@ class TestWebPage(ImpalaTestSuite):
   EVENT_PROCESSOR_URL = "http://localhost:{0}/events"
   HADOOP_VARZ_URL = "http://localhost:{0}/hadoop-varz"
   JVM_THREADZ_URL = "http://localhost:{0}/jvm-threadz"
+  STACKS_URL = "http://localhost:{0}/stacks"
 
   # log4j changes do not apply to the statestore since it doesn't
   # have an embedded JVM. So we make two sets of ports to test the
@@ -199,6 +200,77 @@ class TestWebPage(ImpalaTestSuite):
         assert "beans" in jmx_json.keys(), "Ill formatted JSON returned: %s" % jmx_json
       except ValueError:
         assert False, "Invalid JSON returned from /jmx endpoint: %s" % jmx_json
+
+  def test_stacks_endpoint(self):
+    """Tests that the /stacks endpoint on all daemons returns valid stack traces."""
+    for port in self.TEST_PORTS_WITH_SS:
+      input_url = self.STACKS_URL.format(port)
+      response = requests.get(input_url)
+      assert response.status_code == requests.codes.ok
+      # The /stacks endpoint returns plain text
+      assert "text/plain" in response.headers['Content-Type']
+
+      # Verify the response contains expected stack trace elements
+      stack_text = response.text
+      assert "Collected stacks from" in stack_text, \
+          "Missing collection summary in response from port %s" % port
+      assert "threads in" in stack_text, \
+          "Missing thread count in response from port %s" % port
+      assert "TID" in stack_text, \
+          "Missing thread IDs in response from port %s" % port
+
+      # Verify it contains at least one thread with a stack trace
+      # Stack traces should have lines starting with '@' for frame information
+      assert "@" in stack_text, \
+          "Missing stack frames in response from port %s" % port
+
+  def test_stacks_endpoint_format(self):
+    """Tests that the /stacks endpoint returns properly formatted stack traces."""
+    for port in self.TEST_PORTS_WITH_SS:
+      input_url = self.STACKS_URL.format(port)
+      response = requests.get(input_url)
+      assert response.status_code == requests.codes.ok
+
+      stack_text = response.text
+      lines = stack_text.split('\n')
+
+      # Verify the header line format
+      header_pattern = re.compile(r'Collected stacks from \d+ threads in \d+\.\d+s')
+      assert any(header_pattern.match(line) for line in lines), \
+          "Missing or malformed collection summary header"
+
+      # Verify thread ID format (e.g., "TID 1911294 (statestored):" or
+      # "TID 262192 (subscriber-priority-update-worker(2:10)):" with nested parens)
+      # Use a greedy match that captures everything between "TID <num> (" and "):"
+      tid_pattern = re.compile(r'TID \d+ \(.+\):')
+      assert any(tid_pattern.match(line) for line in lines), \
+          "Missing or malformed thread ID lines"
+
+      # Verify stack frame format (lines starting with '@' and containing addresses)
+      frame_pattern = re.compile(r'^\s*@\s+0x[0-9a-f]+\s+.*')
+      assert any(frame_pattern.match(line) for line in lines), \
+          "Missing or malformed stack frame lines"
+
+      # Check for thread grouping format (e.g., "3 threads with same stack:")
+      # This may or may not be present depending on whether there are duplicate stacks
+      group_pattern = re.compile(r'^\d+ threads with same stack:')
+      has_grouped_threads = any(group_pattern.match(line) for line in lines)
+
+      # If there are grouped threads, verify that the TIDs are listed before the stack
+      if has_grouped_threads:
+        # Find a group header
+        for i, line in enumerate(lines):
+          if group_pattern.match(line):
+            # The next few lines should be TID lines
+            assert i + 1 < len(lines), "Group header at end of output"
+            # At least one TID should follow
+            found_tid = False
+            for j in range(i + 1, min(i + 10, len(lines))):
+              if tid_pattern.match(lines[j]):
+                found_tid = True
+                break
+            assert found_tid, "No TID found after group header"
+            break
 
   def get_and_check_status(
       self, url, string_to_search="", ports_to_test=None, regex=False, headers=None):
@@ -384,6 +456,39 @@ class TestWebPage(ImpalaTestSuite):
     self.__test_catalog_tables_loading_time(unique_database, "foo_part")
     self.get_and_check_status(self.EVENT_PROCESSOR_URL, "events-consuming-delay",
         ports_to_test=self.CATALOG_TEST_PORT)
+    # Multi-key partitioned table
+    multi_part_query = "create table {0}.foo_multi_part (id int, val int) " \
+      "partitioned by (year int, month int, day int)".format(unique_database)
+    self.execute_query(multi_part_query)
+    multi_part_insert_query = "insert into {0}.foo_multi_part partition " \
+      "(year=2024, month=12, day=25) values (1, 200)".format(unique_database)
+    self.execute_query(multi_part_insert_query)
+    # Table with string partition that contains special characters
+    slash_part_query = "create table {0}.foo_slash_part (id int, val int) " \
+      "partitioned by (ds string)".format(unique_database)
+    self.execute_query(slash_part_query)
+    slash_part_insert_query = "insert into {0}.foo_slash_part partition " \
+      "(ds='2024/12/25') values (1, 200)".format(unique_database)
+    self.execute_query(slash_part_insert_query)
+
+    # Test partition catalog objects (IMPALA-9935)
+    self.__test_catalog_partition_object(unique_database, "foo_part", "year=2010",
+        cluster_properties)
+    self.__test_json_partition_object(unique_database, "foo_part", "year=2010",
+        cluster_properties)
+    # Test multi-key partition
+    self.__test_catalog_partition_object(unique_database, "foo_multi_part",
+        "year=2024/month=12/day=25", cluster_properties)
+    self.__test_json_partition_object(unique_database, "foo_multi_part",
+        "year=2024/month=12/day=25", cluster_properties)
+    # Test partition value with slash
+    # Note: Pass the pre-encoded partition name that matches Hive's HDFS directory format.
+    # Hive stores "ds=2024/12/25" as directory "ds=2024%2F12%2F25" in HDFS.
+    # The test methods will URL-encode this again for HTTP transmission (double-encoding).
+    self.__test_catalog_partition_object(unique_database, "foo_slash_part",
+        "ds=2024%2F12%2F25", cluster_properties)
+    self.__test_json_partition_object(unique_database, "foo_slash_part",
+        "ds=2024%2F12%2F25", cluster_properties)
 
   def __test_catalog_object(self, db_name, tbl_name, cluster_properties):
     """Tests the /catalog_object endpoint for the given db/table. Runs
@@ -460,6 +565,86 @@ class TestWebPage(ImpalaTestSuite):
     assert "nullColumnValue" in hdfs_tbl_obj
     assert "partitions" in hdfs_tbl_obj
     assert "prototype_partition" in hdfs_tbl_obj
+
+  def __verify_catalog_partition_html_response(self, response_text):
+    """Verify HTML catalog partition response contains expected Thrift structures."""
+    assert "CatalogException" not in response_text, \
+        "Response should not contain error: " + response_text[:200]
+    assert "TCatalogObject" in response_text, "Response should contain TCatalogObject"
+    assert "THdfsPartition" in response_text, "Response should contain THdfsPartition"
+    assert "THdfsStorageDescriptor" in response_text, \
+        "Response should contain THdfsStorageDescriptor"
+
+  def __test_catalog_partition_object(self, db_name, tbl_name, partition_name,
+      cluster_properties):
+    """Tests the /catalog_object endpoint for the given db/table/partition."""
+    import urllib
+    # URL encode the entire object name (db.table:partition).
+    # This is necessary when partition values contain slashes (e.g., "ds=2024/12/25").
+    object_name = "{0}.{1}:{2}".format(db_name, tbl_name, partition_name)
+    encoded_object_name = urllib.parse.quote(object_name, safe='')
+    obj_url = self.CATALOG_OBJECT_URL + \
+        "?object_type=HDFS_PARTITION&object_name={0}".format(encoded_object_name)
+
+    # Make sure the table is loaded
+    self.client.execute("describe %s.%s" % (db_name, tbl_name))
+
+    if cluster_properties.is_catalog_v2_cluster():
+      # In Catalog V2 (local catalog), endpoint only works on catalogd
+      responses = self.get_and_check_status(obj_url, partition_name,
+          ports_to_test=self.CATALOG_TEST_PORT)
+      self.__verify_catalog_partition_html_response(responses[0].text)
+      # Catalog object endpoint is disabled in local catalog mode on impalad
+      impalad_expected_str = "No URI handler for &apos;/catalog_object&apos;"
+      self.check_endpoint_is_disabled(obj_url, impalad_expected_str,
+          ports_to_test=self.IMPALAD_TEST_PORT)
+    else:
+      # In Catalog V1, endpoint works on both catalogd and impalad
+      responses = self.get_and_check_status(obj_url, partition_name,
+          ports_to_test=self.CATALOG_TEST_PORT)
+      self.__verify_catalog_partition_html_response(responses[0].text)
+
+      responses = self.get_and_check_status(obj_url, partition_name,
+          ports_to_test=self.IMPALAD_TEST_PORT)
+      self.__verify_catalog_partition_html_response(responses[0].text)
+
+  def __test_json_partition_object(self, db_name, tbl_name, partition_name,
+      cluster_properties):
+    """Tests the /catalog_object?json endpoint for the given db/table/partition."""
+    import urllib
+    # URL encode the entire object name (db.table:partition).
+    # This is necessary when partition values contain slashes (e.g., "ds=2024/12/25").
+    object_name = "{0}.{1}:{2}".format(db_name, tbl_name, partition_name)
+    encoded_object_name = urllib.parse.quote(object_name, safe='')
+    obj_url = self.CATALOG_OBJECT_URL + \
+        "?json&object_type=HDFS_PARTITION&object_name={0}".format(encoded_object_name)
+
+    # Make sure the table is loaded
+    self.client.execute("describe %s.%s" % (db_name, tbl_name))
+
+    # Test catalogd endpoint (works in both V1 and V2)
+    responses = self.get_and_check_status(obj_url, ports_to_test=self.CATALOG_TEST_PORT)
+    response_json = json.loads(responses[0].text)
+    assert "json_string" in response_json, "Response should contain json_string"
+    obj = json.loads(response_json["json_string"])
+    assert obj["type"] == 11, "type should be HDFS_PARTITION (11)"
+    assert "catalog_version" in obj, "TCatalogObject should have catalog_version"
+    part_obj = obj["hdfs_partition"]
+    assert part_obj["db_name"] == db_name
+    assert part_obj["tbl_name"] == tbl_name
+    assert part_obj["partition_name"] == partition_name
+
+    # In Catalog V1, also test impalad endpoint
+    if not cluster_properties.is_catalog_v2_cluster():
+      responses = self.get_and_check_status(obj_url, ports_to_test=self.IMPALAD_TEST_PORT)
+      response_json = json.loads(responses[0].text)
+      assert "json_string" in response_json, "Response should contain json_string"
+      obj = json.loads(response_json["json_string"])
+      assert obj["type"] == 11, "type should be HDFS_PARTITION (11)"
+      part_obj = obj["hdfs_partition"]
+      assert part_obj["db_name"] == db_name
+      assert part_obj["tbl_name"] == tbl_name
+      assert part_obj["partition_name"] == partition_name
 
   def check_endpoint_is_disabled(self, url, string_to_search="", ports_to_test=None):
     """Helper method that verifies the given url does not exist."""
@@ -1029,6 +1214,7 @@ class TestWebPage(ImpalaTestSuite):
     assert "catalog.num-functions" in metric_keys
     assert "catalog.hms-client-pool.num-idle" in metric_keys
     assert "catalog.hms-client-pool.num-in-use" in metric_keys
+    assert "catalog.num-loaded-tables" in metric_keys
 
   def test_iceberg_table_metrics(self):
     assert '23448' == self.__get_table_metric(

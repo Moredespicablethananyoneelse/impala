@@ -360,15 +360,13 @@ def wait_for_query_state(vector, stmt, state, max_retry=15):
 
 # Returns shell executable, and whether to include pypi variants
 def get_dev_impala_shell_executable():
-  # Note that pytest.config.getoption is deprecated usage. We use this
-  # in a couple of other places. Ultimately, it needs to be addressed if
-  # we ever want to get off of pytest 2.9.2.
-  impala_shell_executable = pytest.config.getoption('shell_executable')
+  test_prop = ImpalaTestClusterProperties.get_instance()
+  impala_shell_executable = test_prop.pytest_config().getoption('shell_executable')
 
   if impala_shell_executable is not None:
     return impala_shell_executable, False
 
-  if ImpalaTestClusterProperties.get_instance().is_remote_cluster():
+  if test_prop.is_remote_cluster():
     # With remote cluster testing, we cannot assume that the shell was built locally.
     return os.path.join(IMPALA_HOME, "bin/impala-shell.sh"), False
   else:
@@ -380,7 +378,7 @@ def get_dev_impala_shell_executable():
 def create_impala_shell_executable_dimension(dev_only=False):
   _, include_pypi = get_dev_impala_shell_executable()
   dimensions = []
-  python3_pytest = (os.getenv("IMPALA_USE_PYTHON3_TESTS", "false") == "true")
+  python3_pytest = (os.getenv("IMPALA_USE_PYTHON3_TESTS", "true") == "true")
   assert os.getenv("IMPALA_SYSTEM_PYTHON3"), "Must set env var IMPALA_SYSTEM_PYTHON3!"
   dimensions.append('dev3')
   if os.getenv("IMPALA_SYSTEM_PYTHON2") and not python3_pytest:

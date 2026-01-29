@@ -202,6 +202,7 @@ class ImpalaShell(cmd.Cmd, object):
     'VERBOSE': (lambda x: x in ImpalaShell.TRUE_STRINGS, "verbose"),
     'DELIMITER': (lambda x: " " if x == '\\s' else x, "output_delimiter"),
     'OUTPUT_FILE': (lambda x: None if x == '' else x, "output_file"),
+    'PROFILE_OUTPUT': (lambda x: None if x == '' else x, "profile_output"),
     'VERTICAL': (lambda x: x in ImpalaShell.TRUE_STRINGS, "vertical"),
   }
 
@@ -263,6 +264,8 @@ class ImpalaShell(cmd.Cmd, object):
     self.cached_prompt = str()
 
     self.show_profiles = options.show_profiles
+    self.profile_output = options.profile_output
+
     self.rpc_stdout = options.rpc_stdout
     self.rpc_file = options.rpc_file
 
@@ -315,6 +318,7 @@ class ImpalaShell(cmd.Cmd, object):
     self.http_cookie_names = options.http_cookie_names
     self.http_tracing = not options.no_http_tracing
     self.hs2_x_forward = options.hs2_x_forward
+    self.reuse_http_connection = not options.use_new_http_connection
 
     # Due to a readline bug in centos/rhel7, importing it causes control characters to be
     # printed. This breaks any scripting against the shell in non-interactive mode. Since
@@ -681,7 +685,8 @@ class ImpalaShell(cmd.Cmd, object):
                           value_converter=value_converter, rpc_stdout=self.rpc_stdout,
                           rpc_file=self.rpc_file, http_tracing=self.http_tracing,
                           jwt=self.jwt, oauth=self.oauth,
-                          hs2_x_forward=self.hs2_x_forward)
+                          hs2_x_forward=self.hs2_x_forward,
+                          reuse_http_connection=self.reuse_http_connection)
     if protocol == 'hs2':
       return ImpalaHS2Client(self.impalad, self.fetch_size, self.kerberos_host_fqdn,
                           self.use_kerberos, self.kerberos_service_name, self.use_ssl,
@@ -703,7 +708,8 @@ class ImpalaShell(cmd.Cmd, object):
                           connect_max_tries=self.connect_max_tries,
                           rpc_stdout=self.rpc_stdout, rpc_file=self.rpc_file,
                           http_tracing=self.http_tracing, jwt=self.jwt, oauth=self.oauth,
-                          hs2_x_forward=self.hs2_x_forward)
+                          hs2_x_forward=self.hs2_x_forward,
+                          reuse_http_connection=self.reuse_http_connection)
     elif protocol == 'beeswax':
       return ImpalaBeeswaxClient(self.impalad, self.fetch_size, self.kerberos_host_fqdn,
                           self.use_kerberos, self.kerberos_service_name, self.use_ssl,
@@ -1222,26 +1228,37 @@ class ImpalaShell(cmd.Cmd, object):
       file_descriptor.flush()
 
   def print_runtime_profile(self, profile, failed_profile,
-        profile_display_mode=QueryAttemptDisplayModes.LATEST, status=False):
-    """Prints the given runtime profiles to the console. Optionally prints the failed
+        profile_display_mode=QueryAttemptDisplayModes.LATEST):
+    """Prints the given runtime profiles to the console, or to a file if --profile_output
+    or profile_output shell option was set. Optionally prints the failed
     profile if the query was retried. The format the profiles are printed is controlled
     by the option profile_display_mode, see QueryProfileDisplayModes docs above.
     """
-    if self.show_profiles or status:
-      if profile:
-        query_profile_prefix = match_string_type("Query Runtime Profile:\n", profile)
-        if profile_display_mode == QueryAttemptDisplayModes.ALL:
-          print(query_profile_prefix + profile)
-          if failed_profile:
-            failed_profile_prefix = \
-                match_string_type("Failed Query Runtime Profile(s):\n", failed_profile)
-            print(failed_profile_prefix + failed_profile)
-        elif profile_display_mode == QueryAttemptDisplayModes.LATEST:
-          print(query_profile_prefix + profile)
-        elif profile_display_mode == QueryAttemptDisplayModes.ORIGINAL:
-          print(query_profile_prefix + failed_profile if failed_profile else profile)
-        else:
-          raise FatalShellException("Invalid value for query profile display mode")
+
+    if not profile: return
+
+    try:
+      out_file = sys.stdout
+      if self.profile_output:
+        out_file = open(self.profile_output, 'a')
+
+      query_profile_prefix = match_string_type("Query Runtime Profile:\n", profile)
+      if profile_display_mode == QueryAttemptDisplayModes.ALL:
+        print(query_profile_prefix + profile, file=out_file)
+        if failed_profile:
+          failed_profile_prefix = \
+              match_string_type("Failed Query Runtime Profile(s):\n", failed_profile)
+          print(failed_profile_prefix + failed_profile, file=out_file)
+      elif profile_display_mode == QueryAttemptDisplayModes.LATEST:
+        print(query_profile_prefix + profile, file=out_file)
+      elif profile_display_mode == QueryAttemptDisplayModes.ORIGINAL:
+        query_profile = failed_profile if failed_profile else profile
+        print(query_profile_prefix + query_profile, file=out_file)
+      else:
+        raise FatalShellException("Invalid value for query profile display mode")
+    finally:
+      if self.profile_output:
+        out_file.close()
 
   def _parse_table_name_arg(self, arg):
     """ Parses an argument string and returns the result as a db name, table name combo.
@@ -1301,8 +1318,7 @@ class ImpalaShell(cmd.Cmd, object):
 
     profile, failed_profile = self.imp_client.get_runtime_profile(
         self.last_query_handle)
-    return self.print_runtime_profile(profile, failed_profile, profile_display_mode,
-            True)
+    return self.print_runtime_profile(profile, failed_profile, profile_display_mode)
 
   def do_select(self, args):
     """Executes a SELECT... query, fetching all rows"""
@@ -2437,13 +2453,23 @@ def impala_shell_main():
             "BinaryProtocol will not be accelerated, which can reduce performance. "
             "Error was '{0}'".format(e), file=sys.stderr)
 
+  # If output files are given for query results/query profiles,
+  # make sure the given file(s) can be opened for writing.
+  # This will also clear the file(s) if successful.
   if options.output_file:
     try:
-      # Make sure the given file can be opened for writing. This will also clear the file
-      # if successful.
-      open(options.output_file, 'wb')
+      with open(options.output_file, 'wb'):
+        pass
     except IOError as e:
       print('Error opening output file for writing: %s' % e, file=sys.stderr)
+      raise FatalShellException()
+
+  if options.profile_output:
+    try:
+      with open(options.profile_output, 'w'):
+          pass
+    except IOError as e:
+      print('Error opening profile output file for writing: %s' % e, file=sys.stderr)
       raise FatalShellException()
 
   if options.http_socket_timeout_s is not None:

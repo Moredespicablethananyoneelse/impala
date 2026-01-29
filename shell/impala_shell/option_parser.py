@@ -205,6 +205,10 @@ def get_option_parser(defaults):
   parser.add_option("-p", "--show_profiles", dest="show_profiles",
                     action="store_true",
                     help="Always display query profiles after execution")
+  parser.add_option("--profile_output", dest="profile_output",
+                    help="If set, query profiles will be written to the "
+                         "given file. Profiles for multiple semicolon-terminated "
+                         "queries will be appended to the same file")
   parser.add_option("--rpc_stdout", dest="rpc_stdout",
                     action="store_true",
                     help="Output hs2 rpc details to stdout. "
@@ -381,6 +385,11 @@ def get_option_parser(defaults):
                     "execution, even if query does not expect to fetch any rows. "
                     "This is the default behavior when using beeswax protocol. "
                     "Default to false for other Impala protocol.")
+  parser.add_option("--use_new_http_connection", dest="use_new_http_connection",
+                    action="store_true",
+                    help="If set, a new underlying HTTP connection will be used for each "
+                    "request in hs2-http protocol. By default, the underlying HTTP "
+                    "connection is reused for multiple requests.")
 
   # add default values to the help text
   for option in parser.option_list:

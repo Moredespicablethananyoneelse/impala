@@ -21,6 +21,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -40,7 +41,9 @@ import org.apache.hadoop.hive.metastore.LockRequestBuilder;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.Warehouse;
 import org.apache.hadoop.hive.metastore.api.Database;
+import org.apache.hadoop.hive.metastore.api.Decimal;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
+import org.apache.hadoop.hive.metastore.api.InsertEventRequestData;
 import org.apache.hadoop.hive.metastore.api.InvalidOperationException;
 import org.apache.hadoop.hive.metastore.api.LockComponent;
 import org.apache.hadoop.hive.metastore.api.LockRequest;
@@ -50,6 +53,7 @@ import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.NoSuchLockException;
 import org.apache.hadoop.hive.metastore.api.NoSuchTxnException;
 import org.apache.hadoop.hive.metastore.api.Partition;
+import org.apache.hadoop.hive.metastore.api.PrincipalType;
 import org.apache.hadoop.hive.metastore.api.SQLForeignKey;
 import org.apache.hadoop.hive.metastore.api.SQLPrimaryKey;
 import org.apache.hadoop.hive.metastore.api.Table;
@@ -77,6 +81,7 @@ import org.apache.impala.thrift.TValidWriteIdList;
 import org.apache.impala.util.AcidUtils;
 import org.apache.impala.util.AcidUtils.TblTransaction;
 import org.apache.impala.util.HiveMetadataFormatUtils;
+import org.apache.impala.util.MetaStoreUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -112,6 +117,9 @@ public class Hive3MetastoreShimBase {
   // Id used to register transactions / locks.
   // Not final, as it makes sense to set it based on role + instance, see IMPALA-8853.
   public static String TRANSACTION_USER_ID = "Impala";
+
+  public static String HIVE_METASTORE_WAREHOUSE_EXTERNAL =
+      HiveConf.ConfVars.HIVE_METASTORE_WAREHOUSE_EXTERNAL.varname;
 
   /**
    * Initializes and returns a TblTransaction object for table 'tbl'. Opens a new
@@ -880,5 +888,34 @@ public class Hive3MetastoreShimBase {
     public boolean isTruncate() {
       return isTruncate;
     }
+  }
+
+  /**
+   * Wrapper around MetaStoreUtils.isExternalTable
+   */
+  public static boolean isExternalTable(Table table) {
+    return MetaStoreUtils.isExternalTable(table);
+  }
+
+  public static Decimal newDecimal(short scale, ByteBuffer unscaled) {
+    return new Decimal(scale, unscaled);
+  }
+
+  public static PrincipalType getTableOwnerType(Table table) {
+    return table.getOwnerType();
+  }
+
+  public static void setInsertEventRequestDataReplace(
+      InsertEventRequestData insertEventRequestData, boolean isInsertOverwrite) {
+    insertEventRequestData.setReplace(isInsertOverwrite);
+  }
+
+  public static void setTableOwnerType(Table table, PrincipalType principalType) {
+    table.setOwnerType(principalType);
+  }
+
+  public static String getMetastoreConfigValue(
+      IMetaStoreClient client, String config, String defaultVal) throws TException {
+    return MetaStoreUtil.getMetastoreConfigValue(client, config, defaultVal);
   }
 }

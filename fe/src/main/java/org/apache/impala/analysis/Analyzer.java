@@ -92,6 +92,7 @@ import org.apache.impala.planner.JoinNode;
 import org.apache.impala.planner.PlanNode;
 import org.apache.impala.planner.ScanNode;
 import org.apache.impala.planner.UnionNode;
+import org.apache.impala.rewrite.AddEnvIntersectsRule;
 import org.apache.impala.rewrite.BetweenToCompoundRule;
 import org.apache.impala.rewrite.ConvertToCNFRule;
 import org.apache.impala.rewrite.CountDistinctToNdvRule;
@@ -106,15 +107,19 @@ import org.apache.impala.rewrite.FoldConstantsRule;
 import org.apache.impala.rewrite.NormalizeBinaryPredicatesRule;
 import org.apache.impala.rewrite.NormalizeCountStarRule;
 import org.apache.impala.rewrite.NormalizeExprsRule;
+import org.apache.impala.rewrite.NormalizeGeospatialRelationsRule;
+import org.apache.impala.rewrite.PointEnvIntersectsRule;
 import org.apache.impala.rewrite.SimplifyCastExprRule;
 import org.apache.impala.rewrite.SimplifyCastStringToTimestamp;
 import org.apache.impala.rewrite.SimplifyConditionalsRule;
 import org.apache.impala.rewrite.SimplifyDistinctFromRule;
+import org.apache.impala.service.BackendConfig;
 import org.apache.impala.service.FeSupport;
 import org.apache.impala.thrift.QueryConstants;
 import org.apache.impala.thrift.TAccessEvent;
 import org.apache.impala.thrift.TCatalogObjectType;
 import org.apache.impala.thrift.TExecutorGroupSet;
+import org.apache.impala.thrift.TGeospatialLibrary;
 import org.apache.impala.thrift.TImpalaQueryOptions;
 import org.apache.impala.thrift.TLineageGraph;
 import org.apache.impala.thrift.TNetworkAddress;
@@ -658,10 +663,6 @@ public class Analyzer {
     // Shows how many zipping unnests were in the query;
     public int numZippingUnnests = 0;
 
-    // Ids of (collection-typed) SlotDescriptors that were registered with
-    // 'duplicateIfCollections=true' in 'Analyzer.registerSlotRef()'.
-    public Set<SlotId> duplicateCollectionSlots = new HashSet<>();
-
     public GlobalState(StmtTableCache stmtTableCache, TQueryCtx queryCtx,
         AuthorizationFactory authzFactory, AuthorizationContext authzCtx) {
       this.stmtTableCache = stmtTableCache;
@@ -670,6 +671,7 @@ public class Analyzer {
       this.authzFactory = authzFactory;
       this.lineageGraph = new ColumnLineageGraph();
       List<ExprRewriteRule> rules = new ArrayList<>();
+      List<ExprRewriteRule> nonIdempotentRules = new ArrayList<>();
       // BetweenPredicates must be rewritten to be executable. Other non-essential
       // expr rewrites can be disabled via a query option. When rewrites are enabled
       // BetweenPredicates should be rewritten first to help trigger other rules.
@@ -695,9 +697,15 @@ public class Analyzer {
         rules.add(CountDistinctToNdvRule.INSTANCE);
         rules.add(DefaultNdvScaleRule.INSTANCE);
         rules.add(SimplifyCastExprRule.INSTANCE);
+        if (BackendConfig.INSTANCE.getGeospatialLibrary().equals(
+                TGeospatialLibrary.HIVE_ESRI)) {
+          rules.add(NormalizeGeospatialRelationsRule.INSTANCE);
+          rules.add(PointEnvIntersectsRule.INSTANCE);
+          nonIdempotentRules.add(AddEnvIntersectsRule.INSTANCE);
+        }
       }
       rules.add(CountStarToConstRule.INSTANCE);
-      exprRewriter_ = new ExprRewriter(rules);
+      exprRewriter_ = new ExprRewriter(rules, nonIdempotentRules);
       nullSlotsCache =
           queryCtx.getClient_request().getQuery_options().use_null_slots_cache ?
           CacheBuilder.newBuilder().concurrencyLevel(1).recordStats().build() : null;
@@ -879,9 +887,9 @@ public class Analyzer {
   // Set of lowercase ambiguous implicit table aliases.
   private final Set<String> ambiguousAliases_ = new HashSet<>();
 
-  // Map from lowercase fully-qualified path to its slot descriptor. Only contains paths
-  // that have a scalar or struct type as destination (see registerSlotRef()).
-  private final Map<List<String>, SlotDescriptor> slotPathMap_ = new HashMap<>();
+  // Map from path to its slot descriptor. Only contains paths that have a scalar or
+  // struct type as destination (see registerSlotRef()).
+  private final Map<Path, SlotDescriptor> slotPathMap_ = new HashMap<>();
 
   // Indicates whether this analyzer/block is guaranteed to have an empty result set
   // due to a limit 0 or constant conjunct evaluating to false.
@@ -1416,10 +1424,10 @@ public class Analyzer {
   }
 
   /**
-   * Given a list of {"table alias", "column alias"}, return the SlotDescriptor.
+   * Given a Path, return the SlotDescriptor.
    */
-  public SlotDescriptor getSlotDescriptor(List<String> qualifiedColumnName) {
-    return slotPathMap_.get(qualifiedColumnName);
+  public SlotDescriptor getSlotDescriptor(Path slotPath) {
+    return slotPathMap_.get(slotPath);
   }
 
   /**
@@ -1773,20 +1781,19 @@ public class Analyzer {
         // Register a new slot descriptor for collection types. The BE currently
         // relies on this behavior for setting unnested collection slots to NULL.
         SlotDescriptor res = createAndRegisterRawSlotDesc(slotPath, false);
-        globalState_.duplicateCollectionSlots.add(res.getId());
         return res;
       }
-      // SlotRefs with scalar or struct types are registered against the slot's
-      // fully-qualified lowercase path.
-      List<String> key = slotPath.getFullyQualifiedRawPath();
-      Preconditions.checkState(key.stream().allMatch(s -> s.equals(s.toLowerCase())),
-          "Slot paths should be lower case: " + key);
-      SlotDescriptor existingSlotDesc = slotPathMap_.get(key);
+      SlotDescriptor existingSlotDesc = slotPathMap_.get(slotPath);
       if (existingSlotDesc != null) return existingSlotDesc;
 
       SlotDescriptor existingInTuple = findPathInCurrentTuple(slotPath);
       if (existingInTuple != null) return existingInTuple;
 
+      // SlotRefs with scalar or struct types are registered against the slot's
+      // fully-qualified lowercase path.
+      List<String> key = slotPath.getFullyQualifiedRawPath();
+      Preconditions.checkState(key.stream().allMatch(s -> s.equals(s.toLowerCase())),
+          "Slot paths should be lower case: " + key);
       return createAndRegisterSlotDesc(slotPath);
     }
   }
@@ -1805,17 +1812,7 @@ public class Analyzer {
     TupleDescriptor currentTupleDesc = tupleStack_.peek();
     Preconditions.checkNotNull(currentTupleDesc);
 
-    final List<String> slotPathFQR = slotPath.getFullyQualifiedRawPath();
-    Preconditions.checkNotNull(slotPathFQR);
-
-    for (SlotDescriptor slotDesc : currentTupleDesc.getSlots()) {
-      final List<String> tupleSlotFQR = slotDesc.getPath().getFullyQualifiedRawPath();
-      if (slotPathFQR.equals(tupleSlotFQR) &&
-            !globalState_.duplicateCollectionSlots.contains(slotDesc.getId())) {
-        return slotDesc;
-      }
-    }
-    return null;
+    return currentTupleDesc.getUniqueSlotDescriptor(slotPath);
   }
 
   private SlotDescriptor createAndRegisterSlotDesc(Path slotPath)
@@ -1856,7 +1853,9 @@ public class Analyzer {
     Preconditions.checkState(slotPath.isRootedAtTuple());
     desc.setPath(slotPath);
     if (insertIntoSlotPathMap) {
-      slotPathMap_.put(slotPath.getFullyQualifiedRawPath(), desc);
+      slotPathMap_.put(slotPath, desc);
+      // Ensure parent TupleDescriptor can find desc by path.
+      desc.getParent().registerUniqueSlotDescriptorPath(desc);
     }
     registerColumnPrivReq(desc);
   }

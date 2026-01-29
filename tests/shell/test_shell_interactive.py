@@ -132,7 +132,7 @@ class RequestHandler503Extra(RequestHandler503):
     return True
 
 
-class TestHTTPServer503(object):
+class HTTPServer503(object):
   def __init__(self, clazz):
     self.HOST = "localhost"
     self.PORT = get_unused_port()
@@ -150,21 +150,21 @@ def shutdown_server(server):
     server.http_server_thread.join()
 
 
-@pytest.yield_fixture
+@pytest.fixture
 def http_503_server():
   """A fixture that creates an http server that returns a 503 http code."""
-  server = TestHTTPServer503(RequestHandler503)
+  server = HTTPServer503(RequestHandler503)
   yield server
 
   # Cleanup after test.
   shutdown_server(server)
 
 
-@pytest.yield_fixture
+@pytest.fixture
 def http_503_server_extra():
   """A fixture that creates an http server that returns a 503 http code with extra
   body text."""
-  server = TestHTTPServer503(RequestHandler503Extra)
+  server = HTTPServer503(RequestHandler503Extra)
   yield server
 
   # Cleanup after test.
@@ -234,6 +234,8 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
         ("WRITE_DELIMITED: False", "VERBOSE: True"))
     self._expect_with_cmd(proc, "set", vector,
         ("DELIMITER: \\t", "OUTPUT_FILE: None"))
+    self._expect_with_cmd(proc, "set", vector,
+        ("DELIMITER: \\t", "PROFILE_OUTPUT: None"))
     self._expect_with_cmd(proc, "set write_delimited=true", vector)
     self._expect_with_cmd(proc, "set", vector, ("WRITE_DELIMITED: True", "VERBOSE: True"))
     self._expect_with_cmd(proc, "set DELIMITER=,", vector)
@@ -241,6 +243,11 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     self._expect_with_cmd(proc, "set output_file=/tmp/clmn.txt", vector)
     self._expect_with_cmd(proc, "set", vector,
         ("DELIMITER: ,", "OUTPUT_FILE: /tmp/clmn.txt"))
+    self._expect_with_cmd(proc, "set", vector, ("DELIMITER: ,", "PROFILE_OUTPUT: None"))
+    self._expect_with_cmd(proc, "set profile_output=/tmp/profile.txt", vector)
+    self._expect_with_cmd(proc, "set", vector,
+        ("DELIMITER: ,", "PROFILE_OUTPUT: /tmp/profile.txt"))
+
     proc.sendeof()
     proc.wait()
 
@@ -302,6 +309,36 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     p2.send_cmd("select * from nation")
     result = p2.get_result()
     assert "VIETNAM" in result.stdout
+
+  def test_print_runtime_profile_to_file(self, vector):
+    """Test print profile to file and unset"""
+
+    if vector.get_value('strict_hs2_protocol'):
+      pytest.skip("Runtime profile is not supported in strict hs2 mode.")
+
+    # Test writing profile to file
+    p1 = ImpalaShell(vector)
+    local_file = NamedTemporaryFile(delete=True)
+    p1.send_cmd("set profile_output=%s" % local_file.name)
+    p1.send_cmd("select 1")
+    p1.send_cmd("profile")
+    result = p1.get_result()
+    # Profile is not expected in stdout
+    assert "Query Runtime Profile" not in result.stdout
+    # Profile is expected in file
+    with open(local_file.name, "r") as f:
+      result = f.read()
+      assert "Query Runtime Profile" in result
+
+    # Test unset profile
+    p2 = ImpalaShell(vector)
+    p2.send_cmd("set profile_output=%s" % local_file.name)
+    p2.send_cmd("unset profile_output")
+    p2.send_cmd("select 1")
+    p2.send_cmd("profile")
+    result = p2.get_result()
+    # Profile is expected in stdout
+    assert "Query Runtime Profile" in result.stdout
 
   def test_live_progress_no_overlap(self, vector):
     if vector.get_value('strict_hs2_protocol'):
@@ -499,16 +536,16 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     """Test that a disconnected shell does not try to reconnect if quitting"""
     result = run_impala_shell_interactive(vector, 'quit;', shell_args=['-ifoo'],
                                           wait_until_connected=False)
-    assert "reconnect" not in result.stderr
+    assert "Connection lost, reconnecting" not in result.stderr
 
     result = run_impala_shell_interactive(vector, 'exit;', shell_args=['-ifoo'],
                                           wait_until_connected=False)
-    assert "reconnect" not in result.stderr
+    assert "Connection lost, reconnecting" not in result.stderr
 
     # Null case: This is not quitting, so it will result in an attempt to reconnect.
     result = run_impala_shell_interactive(vector, 'show tables;', shell_args=['-ifoo'],
                                           wait_until_connected=False)
-    assert "reconnect" in result.stderr
+    assert "Connection lost, reconnecting" in result.stderr
 
   def test_bash_cmd_timing(self, vector):
     """Test existence of time output in bash commands run from shell"""
@@ -704,8 +741,9 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
       self._expect_with_cmd(child_proc, "select 'hi'", vector, ('hi'))
       child_proc.sendline('exit;')
       child_proc.expect(pexpect.EOF)
-      history_contents = open(new_hist.name).read()
-      assert "select 'hi'" in history_contents
+      with open(new_hist.name) as f:
+        history_contents = f.read()
+        assert "select 'hi'" in history_contents
 
   def test_rerun(self, vector, tmp_history_file):  # noqa: U100
     """Smoke test for the 'rerun' command"""
@@ -753,10 +791,11 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     assert False, "No tip found in output %s" % result.stderr
 
   def test_var_substitution(self, vector):
-    cmds = open(os.path.join(QUERY_FILE_PATH, 'test_var_substitution.sql')).read()
-    args = ["--var=foo=123", "--var=BAR=456", "--delimited", "--output_delimiter= "]
-    result = run_impala_shell_interactive(vector, cmds, shell_args=args)
-    assert_var_substitution(result)
+    with open(os.path.join(QUERY_FILE_PATH, 'test_var_substitution.sql')) as f:
+      cmds = f.read()
+      args = ["--var=foo=123", "--var=BAR=456", "--delimited", "--output_delimiter= "]
+      result = run_impala_shell_interactive(vector, cmds, shell_args=args)
+      assert_var_substitution(result)
 
   def test_query_option_configuration(self, vector):
     if vector.get_value('strict_hs2_protocol'):

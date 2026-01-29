@@ -2097,6 +2097,12 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
   """Runs all of the tests from TestAdmissionController but with the second impalad in the
   minicluster configured to perform all admission control."""
 
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestAdmissionControllerWithACService, cls).add_test_dimensions()
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('admission_control_rpc_compress_threshold_bytes', 0, 1))
+
   def get_ac_process(self):
     return self.cluster.admissiond
 
@@ -2406,10 +2412,8 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     assert new_total_bytes < old_total_bytes * 1.1
     # Check if the admission state map size stays 1 all the time, which is
     # the long running query.
-    admissiond_log = self.get_ac_log_name()
-    self.assert_log_contains(admissiond_log, 'INFO',
-      "Current admission state map size: {}".format(1),
-      expected_count=number_of_iterations)
+    admission_state_size = ac.get_metric_value("admission-control-service.num-queries")
+    assert admission_state_size == 1
 
     # Cleanup clients.
     client1.close()
@@ -2421,6 +2425,64 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     num_queries_hwm = \
       ac.get_metric_value("admission-control-service.num-queries-high-water-mark")
     assert num_queries_hwm > 1
+
+  @SkipIfNotHdfsMinicluster.tuned_for_minicluster
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+      impalad_args=("--debug_actions=INBOUND_GETQUERYSTATUS_REJECT:FAIL@0.2 "
+                    "--vmodule=admission-control-service=3 "
+                    "--default_pool_max_requests=1 --queue_wait_timeout_ms=1"),
+      disable_log_buffering=True
+  )
+  def test_admission_state_map_leak_in_dequeue(self):
+    """
+    Regression test for IMPALA-14605.
+    We verify that cancellations of dequeued queries when there are dropped due to
+    backpressure errors do not leak memory in the admission_state_map.
+    """
+
+    # Log patterns to verify.
+    LOG_PATTERN_LEAK_FIX = "Dequeued cancelled query"
+    LOG_PATTERN_INJECTION = "dropped due to backpressure"
+
+    ac_service = self.cluster.admissiond.service
+
+    # The workload for concurrent clients.
+    def run_client_workload(client_index):
+        impalad = self.cluster.impalads[client_index % len(self.cluster.impalads)]
+        client = impalad.service.create_hs2_client()
+        query = "select sleep(1000)"
+        # Run multiple iterations to maximize race condition probability.
+        for i in range(10):
+          try:
+            handle = client.execute_async(query)
+            client.wait_for_finished_timeout(handle, 3000)
+            client.close_query(handle)
+          except Exception:
+            pass
+        try:
+          client.close()
+        except Exception:
+          pass
+    threads = []
+    # Use multiple clients to do the queries concurrently.
+    num_clients = 5
+    for i in range(num_clients):
+        t = threading.Thread(target=run_client_workload, args=(i,))
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
+    # Verify the logs and metrics.
+    ac_service.wait_for_metric_value(
+      "admission-control-service.num-queries", 0)
+    num_queries_hwm = \
+      ac_service.get_metric_value("admission-control-service.num-queries-high-water-mark")
+    assert num_queries_hwm > 1
+    self.assert_log_contains_multiline("admissiond", "INFO", LOG_PATTERN_INJECTION)
+    self.assert_log_contains_multiline("admissiond", "INFO", LOG_PATTERN_LEAK_FIX)
 
   @SkipIfNotHdfsMinicluster.tuned_for_minicluster
   @pytest.mark.execute_serially

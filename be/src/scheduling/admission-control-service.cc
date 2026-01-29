@@ -114,11 +114,24 @@ Status AdmissionControlService::Init() {
           bind<void>(&AdmissionControlService::AdmitFromThreadPool, this, _2)));
   ABORT_IF_ERROR(admission_thread_pool_->Init());
 
+  RETURN_IF_ERROR(Thread::Create("admission-control-service",
+      "admission-state-map-cleanup",
+      &AdmissionControlService::AdmissionStateMapCleanupLoop, this, &cleanup_thread_));
+
   return Status::OK();
 }
 
 void AdmissionControlService::Join() {
   admission_thread_pool_->Join();
+  shutdown_.store(true);
+  {
+    // Signal the cleanup thread to exit.
+    std::lock_guard<std::mutex> l(cleanup_queue_lock_);
+    cleanup_queue_cv_.notify_all();
+  }
+  DCHECK(cleanup_thread_ != nullptr);
+  // Wait for the cleanup thread to finish clearing the queue.
+  cleanup_thread_->Join();
 }
 
 Status AdmissionControlService::GetProxy(
@@ -138,16 +151,21 @@ void AdmissionControlService::AdmitQuery(
   VLOG(1) << "AdmitQuery: query_id=" << req->query_id()
           << " coordinator=" << req->coord_id();
 
-  shared_ptr<AdmissionState> admission_state;
-  admission_state = make_shared<AdmissionState>(req->query_id(), req->coord_id());
-  admission_state->query_exec_request = make_unique<TQueryExecRequest>();
-
+  shared_ptr<AdmissionState> admission_state =
+      make_shared<AdmissionState>(req->query_id(), req->coord_id());
   admission_state->summary_profile =
       RuntimeProfile::Create(&admission_state->profile_pool, "Summary");
+  if (req->has_is_compressed() && req->is_compressed()) {
+    admission_state->query_exec_request_compressed =
+        make_unique<TQueryExecRequestCompressed>();
+    RESPOND_IF_ERROR(GetSidecar(req->query_exec_request_sidecar_idx(), rpc_context,
+        admission_state->query_exec_request_compressed.get()));
 
-  RESPOND_IF_ERROR(GetSidecar(req->query_exec_request_sidecar_idx(), rpc_context,
-      admission_state->query_exec_request.get()));
-
+  } else {
+    admission_state->query_exec_request = make_unique<TQueryExecRequest>();
+    RESPOND_IF_ERROR(GetSidecar(req->query_exec_request_sidecar_idx(), rpc_context,
+        admission_state->query_exec_request.get()));
+  }
   for (const NetworkAddressPB& address : req->blacklisted_executor_addresses()) {
     admission_state->blacklisted_executor_addresses.emplace(address);
   }
@@ -199,7 +217,7 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
         if (admission_state->admit_status.ok()) {
           *resp->mutable_query_schedule() = *admission_state->schedule.get();
           // Free TQueryExecRequest since it's not required after admission is done
-          admission_state->query_exec_request.reset();
+          admission_state->ReleaseQueryExecRequest();
         } else {
           status = admission_state->admit_status;
         }
@@ -228,7 +246,7 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
     // a retry may fail with an "Invalid handle" error because the entry is gone.
     // This is okay and doesn't cause any real problem.
     // To make it more robust, we may delay the removal using a time-based approach.
-    discard_result(admission_state_map_.Delete(req->query_id()));
+    CleanupAdmissionStateMapAsync(req->query_id(), __func__);
     VLOG(3) << "Current admission state map size: " << admission_state_map_.Count();
   }
   RespondAndReleaseRpc(status, resp, rpc_context);
@@ -252,7 +270,9 @@ void AdmissionControlService::ReleaseQuery(const ReleaseQueryRequestPB* req,
     }
   }
 
-  RESPOND_IF_ERROR(admission_state_map_.Delete(req->query_id()));
+  // Use async cleanup as the centralized way for admission state deletion, the
+  // client should not need to handle deletion errors of this internal map.
+  CleanupAdmissionStateMapAsync(req->query_id(), __func__);
   RespondAndReleaseRpc(Status::OK(), resp, rpc_context);
 }
 
@@ -313,9 +333,7 @@ void AdmissionControlService::AdmissionHeartbeat(const AdmissionHeartbeatRequest
           req->host_id(), query_ids);
 
   for (const UniqueIdPB& query_id : cleaned_up) {
-    // ShardedQueryMap::Delete will log an error already if anything goes wrong, so just
-    // ignore the return value.
-    discard_result(admission_state_map_.Delete(query_id));
+    CleanupAdmissionStateMapAsync(query_id, __func__);
   }
 
   RespondAndReleaseRpc(Status::OK(), resp, rpc_context);
@@ -330,9 +348,7 @@ void AdmissionControlService::CancelQueriesOnFailedCoordinators(
 
   for (const auto& entry : cleaned_up) {
     for (const UniqueIdPB& query_id : entry.second) {
-      // ShardedQueryMap::Delete will log an error already if anything goes wrong, so just
-      // ignore the return value.
-      discard_result(admission_state_map_.Delete(query_id));
+      CleanupAdmissionStateMapAsync(query_id, __func__);
     }
   }
 }
@@ -348,9 +364,19 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
   {
     lock_guard<mutex> l(admission_state->lock);
     bool queued;
+    if (admission_state->query_exec_request) {
+      admission_state->admission_exec_request =
+          std::make_unique<AdmissionExecRequestUncompressed>(
+              admission_state->query_exec_request.get());
+    } else {
+      admission_state->admission_exec_request =
+          std::make_unique<AdmissionExecRequestCompressed>(
+              admission_state->query_exec_request_compressed.get(),
+              AdmissiondEnv::GetInstance()->admission_controller());
+    }
+
     AdmissionController::AdmissionRequest request = {admission_state->query_id,
-        admission_state->coord_id, *admission_state->query_exec_request,
-        admission_state->query_exec_request->query_ctx.client_request.query_options,
+        admission_state->coord_id, *admission_state->admission_exec_request,
         admission_state->summary_profile,
         admission_state->blacklisted_executor_addresses};
     admission_state->admit_status =
@@ -389,6 +415,33 @@ bool AdmissionControlService::CheckAndUpdateHeartbeat(
     return true;
   }
   return false;
+}
+
+void AdmissionControlService::CleanupAdmissionStateMapAsync(
+    const UniqueIdPB& query_id, const char* caller_func) {
+  {
+    std::lock_guard<std::mutex> lock(cleanup_queue_lock_);
+    admission_state_cleanup_queue_.emplace_back(query_id, caller_func);
+  }
+  cleanup_queue_cv_.notify_all();
+}
+
+void AdmissionControlService::AdmissionStateMapCleanupLoop() {
+  std::unique_lock<std::mutex> lock(cleanup_queue_lock_);
+  while (true) {
+    cleanup_queue_cv_.wait(lock,
+        [&] { return !admission_state_cleanup_queue_.empty() || shutdown_.load(); });
+    if (admission_state_cleanup_queue_.empty() && shutdown_.load()) return;
+    std::deque<std::pair<UniqueIdPB, const char*>> local_queue;
+    std::swap(local_queue, admission_state_cleanup_queue_);
+    lock.unlock();
+    for (const auto& entry : local_queue) {
+      discard_result(admission_state_map_.Delete(entry.first));
+      VLOG_QUERY << "Cleaned up admission state map for query=" << PrintId(entry.first)
+                 << ", triggered by function: " << entry.second;
+    }
+    lock.lock();
+  }
 }
 
 } // namespace impala

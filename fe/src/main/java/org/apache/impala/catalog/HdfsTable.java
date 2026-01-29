@@ -50,7 +50,7 @@ import org.apache.hadoop.hive.metastore.api.NoSuchObjectException;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.PrimaryKeysRequest;
 import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
-import org.apache.hadoop.hive.metastore.utils.FileUtils;
+import org.apache.hadoop.hive.common.FileUtils;
 import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.LiteralExpr;
@@ -1045,6 +1045,8 @@ public class HdfsTable extends Table implements FeFsTable {
     boolean partitionNotChanged = partBuilder.equalsToOriginal(oldPartition);
     LOG.trace("Partition {} {}", oldPartition.getName(),
         partitionNotChanged ? "changed" : "unchanged");
+    // for partitioned refresh, partition should be updated whether the partition is
+    // changed or not.
     if (partitionNotChanged) return false;
     HdfsPartition newPartition = partBuilder.build();
     // Partition is reloaded and hence cache directives are not dropped.
@@ -1805,6 +1807,18 @@ public class HdfsTable extends Table implements FeFsTable {
       parts.add(partition);
     }
     return parts;
+  }
+
+  /**
+   * Returns the partition with the given partition name, or null if it doesn't exist.
+   * Uses the nameToPartitionMap_ for O(1) lookup.
+   */
+  public HdfsPartition getPartitionByName(String partitionName) {
+    String partName = DEFAULT_PARTITION_NAME;
+    if (partitionName != null && partitionName.length() > 0) {
+      partName = partitionName;
+    }
+    return nameToPartitionMap_.get(partName);
   }
 
   /**

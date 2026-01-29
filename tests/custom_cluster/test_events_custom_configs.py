@@ -491,11 +491,11 @@ class TestEventProcessingCustomConfigs(TestEventProcessingCustomConfigsBase):
       else:
         db_1 = "{}_1".format(db)
         if rename_db:
-          self.execute_query_expect_success(self.create_impala_client(),
+          self.execute_query_expect_success(self.client,
             "drop database if exists {0} cascade".format(db_1))
-          self.execute_query_expect_success(self.create_impala_client(),
+          self.execute_query_expect_success(self.client,
             "create database {0}".format(db_1))
-        self.execute_query_expect_success(self.create_impala_client(),
+        self.execute_query_expect_success(self.client,
           "create table if not exists {0}.rename_test_1 (i int)".format(db))
         if rename_db:
           queries = [
@@ -511,7 +511,7 @@ class TestEventProcessingCustomConfigs(TestEventProcessingCustomConfigsBase):
       create_metric_name = "tables-added"
       removed_metric_name = "tables-removed"
     elif type == "database":
-      self.execute_query_expect_success(self.create_impala_client(),
+      self.execute_query_expect_success(self.client,
         "drop database if exists {0}".format("test_create_drop_db"))
       queries = [
         "create database {db}".format(db="test_create_drop_db"),
@@ -521,7 +521,7 @@ class TestEventProcessingCustomConfigs(TestEventProcessingCustomConfigsBase):
       removed_metric_name = "databases-removed"
     else:
       tbl_name = "test_create_drop_partition"
-      self.execute_query_expect_success(self.create_impala_client(),
+      self.execute_query_expect_success(self.client,
         "create table {db}.{tbl} (c int) partitioned by (p int)".format(
           db=db, tbl=tbl_name))
       queries = [
@@ -540,7 +540,7 @@ class TestEventProcessingCustomConfigs(TestEventProcessingCustomConfigsBase):
     for iter in range(num_iters):
       for q in queries:
         try:
-          self.execute_query_expect_success(self.create_impala_client(), q)
+          self.execute_query_expect_success(self.client, q)
         except Exception as e:
           print("Failed in {} iterations. Error {}".format(iter, str(e)))
           raise
@@ -1297,6 +1297,52 @@ class TestEventProcessingCustomConfigs(TestEventProcessingCustomConfigsBase):
     data = int(self.execute_scalar("select count(*) from {0}.{1}".format(
       unique_database, hive_tbl)))
     assert data == 0
+
+  @CustomClusterTestSuite.with_args(
+    catalogd_args="--hms_event_polling_interval_s=1"
+                  " --enable_reload_events=true"
+                  " --debug_actions=fire_reload_event_delay:SLEEP@3000|"
+                  "older_event_check_delay:SLEEP@3000"
+                  " --enable_skipping_older_events=true")
+  def test_verify_last_refresh_event_id(self, unique_database):
+    """Test to verify IMPALA-12865 to not skip the events older but not processed by
+       event processor. Also, the test verifies self-events of reload event."""
+    tbl = unique_database + ".partitioned_tbl"
+    self.client.execute(
+      "create external table {} (i int) partitioned by (year int)".format(tbl))
+    self.client.execute(
+      "alter table {} add partition(year=2024)".format(tbl))
+    EventProcessorUtils.wait_for_event_processing(self)
+
+    def __verify_refresh(verify_self_event=False):
+      prev_events_skipped = EventProcessorUtils.get_int_metric('events-skipped', 0)
+      if not verify_self_event:
+        handle = self.client.execute_async(
+          "refresh {} partition(year=2024)".format(tbl))
+        self.run_stmt_in_hive(
+          "alter table {} partition(year=2024) set fileformat ORC".format(tbl))
+      else:
+        handle = self.client.execute_async(
+          "refresh {} partition(year=2024) partition(year=2025)".format(tbl))
+        self.run_stmt_in_hive(
+          "create table {} (i int)".format(unique_database + ".tbl2"))
+      parts_refreshed_before = EventProcessorUtils.get_int_metric("partitions-refreshed")
+      self.client.wait_for_impala_state(handle, FINISHED, timeout=10)
+      assert self.client.is_finished(handle)
+      EventProcessorUtils.wait_for_event_processing(self, timeout=10)  # avoid flakiness
+      current_events_skipped = EventProcessorUtils.get_int_metric('events-skipped', 0)
+      parts_refreshed_after = EventProcessorUtils.get_int_metric("partitions-refreshed")
+      if verify_self_event:
+        assert parts_refreshed_after == parts_refreshed_before
+      else:
+        assert parts_refreshed_after > parts_refreshed_before
+      assert current_events_skipped > prev_events_skipped
+
+    __verify_refresh(False)
+    self.client.execute(
+      "alter table {} add partition(year=2025)".format(tbl))
+    EventProcessorUtils.wait_for_event_processing(self, timeout=10)
+    __verify_refresh(True)
 
   @SkipIf.is_test_jdk
   @CustomClusterTestSuite.with_args(

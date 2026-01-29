@@ -225,29 +225,29 @@ inline bool ParseHeader(FunctionContext* ctx, const StringVal& geom, OGCType* og
   if (UNLIKELY(geom.is_null)) return false;
 
   if (UNLIKELY(geom.len < MIN_GEOM_SIZE)) {
-    ctx->SetError("Geometry size too small.");
+    ctx->AddWarning("Geometry size too small.");
     return false;
   }
 
   const OGCType unchecked_ogc_type = getOGCType(geom);
   if (UNLIKELY(unchecked_ogc_type < UNKNOWN || unchecked_ogc_type > ST_MULTIPOLYGON)) {
-    ctx->SetError("Invalid geometry type.");
+    ctx->AddWarning("Invalid geometry type.");
     return false;
   }
 
   if (UNLIKELY(unchecked_ogc_type == UNKNOWN)) {
-    ctx->SetError("Geometry type UNKNOWN.");
+    ctx->AddWarning("Geometry type UNKNOWN.");
     return false;
   }
 
   if (UNLIKELY(unchecked_ogc_type == ST_POINT)) {
     if (geom.len < MIN_POINT_SIZE) {
-      ctx->SetError("Geometry size too small for ST_POINT type.");
+      ctx->AddWarning("Geometry size too small for ST_POINT type.");
       return false;
     }
   } else {
     if (UNLIKELY(geom.len < MIN_NON_POINT_SIZE)) {
-      ctx->SetError("Geometry size too small for non ST_POINT type.");
+      ctx->AddWarning("Geometry size too small for non ST_POINT type.");
       return false;
     }
   }
@@ -289,6 +289,19 @@ inline bool bBoxIntersects(const StringVal& lhs_geom, const StringVal rhs_geom,
 
   if (xmax1 < xmin2 || xmax2 < xmin1 || ymax1 < ymin2 || ymax2 < ymin1 ) return false;
   return true;
+}
+
+inline StringVal createStPoint(FunctionContext* ctx, double x, double y,
+    uint32_t srid = 0) {
+  StringVal res(ctx, MIN_POINT_SIZE);
+
+  setSrid(res, srid);
+  setOGCType(res, ST_POINT);
+  setEsriType(res, ShapePoint);
+  setMinX(res, x);
+  setMinY(res, y);
+
+  return res;
 }
 
 } // namespace impala

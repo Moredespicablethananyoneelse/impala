@@ -611,17 +611,25 @@ public class CatalogOpExecutor {
           TGrantRevokeRoleParams grant_role_params =
               ddlRequest.getGrant_revoke_role_params();
           tTableName = Optional.of(new TTableName(
-              StringUtils.join(",", grant_role_params.group_names), ""));
+              StringUtils.join(",",
+                  grant_role_params.getUser_names().isEmpty() ?
+                      grant_role_params.getGroup_names() :
+                      grant_role_params.getUser_names()),
+              /* table_name */ ""));
           catalogOpTracker_.increment(ddlRequest, tTableName);
-          grantRoleToGroup(requestingUser, grant_role_params, response);
+          grantRoleToGroupOrUser(requestingUser, grant_role_params, response);
           break;
         case REVOKE_ROLE:
           TGrantRevokeRoleParams revoke_role_params =
               ddlRequest.getGrant_revoke_role_params();
           tTableName = Optional.of(new TTableName(
-              StringUtils.join(",", revoke_role_params.group_names), ""));
+              StringUtils.join(",",
+                  revoke_role_params.getUser_names().isEmpty() ?
+                      revoke_role_params.getGroup_names() :
+                      revoke_role_params.getUser_names()),
+              /* table_name */ ""));
           catalogOpTracker_.increment(ddlRequest, tTableName);
-          revokeRoleFromGroup(
+          revokeRoleFromGroupOrUser(
               requestingUser, revoke_role_params, response);
           break;
         case GRANT_PRIVILEGE:
@@ -3382,8 +3390,8 @@ public class CatalogOpExecutor {
           authzManager_.updateTableOwnerPrivilege(params.server_name,
               table.getDb().getName(), table.getName(),
               table.getMetaStoreTable().getOwner(),
-              table.getMetaStoreTable().getOwnerType(), /* newOwner */ null,
-              /* newOwnerType */ null, resp);
+              MetastoreShim.getTableOwnerType(table.getMetaStoreTable()),
+              /* newOwner */ null, /* newOwnerType */ null, resp);
         }
       }
     } finally {
@@ -3699,8 +3707,8 @@ public class CatalogOpExecutor {
           // We will issue an HMS API call. Register in-flight event before we do.
           modification.registerInflightEvent();
           String dbName = Preconditions.checkNotNull(hdfsTable.getDb()).getName();
-          client.getHiveClient()
-              .truncateTable(dbName, hdfsTable.getName(), null);
+          MetastoreShim.truncateTable(client.getHiveClient(), dbName,
+              hdfsTable.getName(), null, null, -1L);
           catalogTimeline.markEvent("Truncated table in Metastore");
           LOG.trace("Time elapsed after truncating table {} using HMS API: {} msec",
               hdfsTable.getFullName(), sw.elapsed(TimeUnit.MILLISECONDS));
@@ -4187,8 +4195,8 @@ public class CatalogOpExecutor {
       if (authzConfig_.isEnabled()) {
         authzManager_.updateTableOwnerPrivilege(serverName, msTable.getDbName(),
             msTable.getTableName(), /* oldOwner */ null,
-            /* oldOwnerType */ null, msTable.getOwner(), msTable.getOwnerType(),
-            response);
+            /* oldOwnerType */ null, msTable.getOwner(),
+            MetastoreShim.getTableOwnerType(msTable), response);
       }
     } finally {
       getMetastoreDdlLock().unlock();
@@ -6714,9 +6722,10 @@ public class CatalogOpExecutor {
       InProgressTableModification modification) throws ImpalaException {
     org.apache.hadoop.hive.metastore.api.Table msTbl = tbl.getMetaStoreTable().deepCopy();
     String oldOwner = msTbl.getOwner();
-    PrincipalType oldOwnerType = msTbl.getOwnerType();
+    PrincipalType oldOwnerType = MetastoreShim.getTableOwnerType(msTbl);
     msTbl.setOwner(params.owner_name);
-    msTbl.setOwnerType(PrincipalType.valueOf(params.owner_type.name()));
+    MetastoreShim.setTableOwnerType(msTbl,
+        PrincipalType.valueOf(params.owner_type.name()));
 
     // A KuduTable is synchronized if it is a managed KuduTable, or an external table
     // with the property of 'external.table.purge' being true.
@@ -6737,7 +6746,7 @@ public class CatalogOpExecutor {
     if (authzConfig_.isEnabled()) {
       authzManager_.updateTableOwnerPrivilege(params.server_name, msTbl.getDbName(),
           msTbl.getTableName(), oldOwner, oldOwnerType, msTbl.getOwner(),
-          msTbl.getOwnerType(), response);
+          MetastoreShim.getTableOwnerType(msTbl), response);
     }
   }
 
@@ -7080,28 +7089,28 @@ public class CatalogOpExecutor {
   /**
    * Grants a role to the given group on behalf of the requestingUser.
    */
-  private void grantRoleToGroup(User requestingUser,
+  private void grantRoleToGroupOrUser(User requestingUser,
       TGrantRevokeRoleParams grantRevokeRoleParams, TDdlExecResponse resp)
       throws ImpalaException {
     Preconditions.checkNotNull(requestingUser);
     Preconditions.checkNotNull(grantRevokeRoleParams);
     Preconditions.checkNotNull(resp);
     Preconditions.checkArgument(grantRevokeRoleParams.isIs_grant());
-    authzManager_.grantRoleToGroup(requestingUser, grantRevokeRoleParams, resp);
+    authzManager_.grantRoleToGroupOrUser(requestingUser, grantRevokeRoleParams, resp);
     addSummary(resp, "Role has been granted.");
   }
 
   /**
    * Revokes a role from the given group on behalf of the requestingUser.
    */
-  private void revokeRoleFromGroup(User requestingUser,
+  private void revokeRoleFromGroupOrUser(User requestingUser,
       TGrantRevokeRoleParams grantRevokeRoleParams, TDdlExecResponse resp)
       throws ImpalaException {
     Preconditions.checkNotNull(requestingUser);
     Preconditions.checkNotNull(grantRevokeRoleParams);
     Preconditions.checkNotNull(resp);
     Preconditions.checkArgument(!grantRevokeRoleParams.isIs_grant());
-    authzManager_.revokeRoleFromGroup(requestingUser, grantRevokeRoleParams, resp);
+    authzManager_.revokeRoleFromGroupOrUser(requestingUser, grantRevokeRoleParams, resp);
     addSummary(resp, "Role has been revoked.");
   }
 
@@ -7443,7 +7452,7 @@ public class CatalogOpExecutor {
         }
         Preconditions.checkNotNull(tbl, "tbl is null in " + cmdString);
         // fire event for refresh event and update the last refresh event id
-        fireReloadEventAndUpdateRefreshEventId(req, tblName, tbl);
+        fireReloadEventAndUpdateRefreshEventId(req, tblName, tbl, eventId);
         catalogTimeline.markEvent("Fired reload events in Metastore");
       }
 
@@ -7506,7 +7515,7 @@ public class CatalogOpExecutor {
    * and update the last refresh event id in the cache
    */
   private void fireReloadEventAndUpdateRefreshEventId(
-      TResetMetadataRequest req, TableName tblName, Table tbl) {
+      TResetMetadataRequest req, TableName tblName, Table tbl, long currentHMSEventId) {
     // Partition spec (List<TPartitionKeyValue>) for each partition
     List<List<TPartitionKeyValue>> partSpecList = null;
     // Partition values (List<String>) for each partition
@@ -7523,10 +7532,18 @@ public class CatalogOpExecutor {
               .collect(Collectors.toList()))
           .collect(Collectors.toList());
     }
+    DebugUtils.executeDebugAction(
+        BackendConfig.INSTANCE.debugActions(), DebugUtils.FIRE_RELOAD_EVENT_DELAY);
+    long newCatalogVersion = catalog_.incrementAndGetCatalogVersion();
     try {
+      Map<String, String> selfEventProps = new HashMap<>();
+      selfEventProps.put(MetastoreEventPropertyKey.CATALOG_SERVICE_ID.getKey(),
+          catalog_.getCatalogServiceId());
+      selfEventProps.put(MetastoreEventPropertyKey.CATALOG_VERSION.getKey(),
+          String.valueOf(newCatalogVersion));
       List<Long> eventIds = MetastoreShim.fireReloadEventHelper(
           catalog_.getMetaStoreClient(), req.isIs_refresh(), partValsList,
-          tblName.getDb(), tblName.getTbl(), Collections.emptyMap());
+          tblName.getDb(), tblName.getTbl(), selfEventProps);
       LOG.info("Fired {} RELOAD events for table {}: {}", eventIds.size(),
           tbl.getFullName(), StringUtils.join(",", eventIds));
       // Update the lastRefreshEventId accordingly
@@ -7539,6 +7556,10 @@ public class CatalogOpExecutor {
       }
 
       // tbl lock is held at this point.
+      // It is possible that some operations might have modified the metadata externally
+      // while refresh operation is still in-progress, so it is safe to set the latest
+      // HMS notification event id before refresh operation, on the metadata object as
+      // lastRefreshEventId
       if (partSpecList != null) {
         Preconditions.checkNotNull(partValsList);
         boolean partitionChanged = false;
@@ -7546,11 +7567,20 @@ public class CatalogOpExecutor {
           HdfsTable hdfsTbl = (HdfsTable) tbl;
           HdfsPartition partition = hdfsTbl
               .getPartitionFromThriftPartitionSpec(partSpecList.get(i));
+          if (currentHMSEventId + 1 == eventIds.get(i)) {
+            currentHMSEventId = eventIds.get(i);
+          }
           if (partition != null) {
             HdfsPartition.Builder partBuilder = new HdfsPartition.Builder(partition);
             // use last event id, so that batch partition events will not reloaded again
-            partBuilder.setLastRefreshEventId(eventIds.get(eventIds.size() - 1));
-            partitionChanged |= hdfsTbl.updatePartition(partBuilder);
+            partBuilder.setLastRefreshEventId(currentHMSEventId);
+            if (hdfsTbl.updatePartition(partBuilder)) {
+              partitionChanged = true;
+              partition = hdfsTbl.getPartitionFromThriftPartitionSpec(
+                  partSpecList.get(i));
+              Preconditions.checkNotNull(partition, "Partition is null after update");
+            }
+            partition.addToVersionsForInflightEvents(false, newCatalogVersion);
           } else {
             LOG.warn("Partition {} no longer exists in table {}. It might be " +
                     "dropped by a concurrent operation.",
@@ -7563,8 +7593,14 @@ public class CatalogOpExecutor {
           tbl.setCatalogVersion(catalog_.incrementAndGetCatalogVersion());
         }
       } else {
-        tbl.setLastRefreshEventId(eventIds.get(0));
+        if (currentHMSEventId + 1 == eventIds.get(0)) {
+          currentHMSEventId = eventIds.get(0);
+        }
+        tbl.setLastRefreshEventId(currentHMSEventId);
+        // Add inflight event at table level
+        catalog_.addVersionsForInflightEvents(false, tbl, newCatalogVersion);
       }
+
     } catch (TException | CatalogException e) {
       LOG.error(String.format(HMS_RPC_ERROR_FORMAT_STR,
           "fireReloadEvent") + e.getMessage());
@@ -8213,7 +8249,8 @@ public class CatalogOpExecutor {
       new ArrayList<>(newFiles.size()));
     boolean isTransactional = AcidUtils.isTransactionalTable(tbl);
     MetastoreShim.setPartitionVal(insertEventRequestData, partVals);
-    insertEventRequestData.setReplace(isInsertOverwrite);
+    MetastoreShim.setInsertEventRequestDataReplace(insertEventRequestData,
+        isInsertOverwrite);
     for (FileMetadata metadata : newFiles) {
       insertEventRequestData.addToFilesAdded(metadata.filename);
       insertEventRequestData.addToFilesAddedChecksum(metadata.getChecksum());
