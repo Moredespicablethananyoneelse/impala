@@ -428,14 +428,14 @@ Status LlvmCodeGen::CreateImpalaCodegen(FragmentState* state,
   SCOPED_TIMER(codegen->prepare_module_timer_);
   SCOPED_THREAD_COUNTER_MEASUREMENT(codegen->llvm_thread_counters_);
 
-  // Get type for StringValue
-  codegen->string_value_type_ = codegen->GetStructType<StringValue>();
+  // Get type for StringValue  IMPALA-11643 issue
+  codegen->string_value_type_ = codegen->GetStructType<StringValue>();  // 返回的是不是StringValue类型Lowered后的类型？
 
-  // Get type for TimestampValue
-  codegen->timestamp_value_type_ = codegen->GetStructType<TimestampValue>();
+  // Get type for TimestampValue   IMPALA-11643 issue
+  codegen->timestamp_value_type_ = codegen->GetStructType<TimestampValue>();   // 返回的是不是TimestampValue类型Lowered后的类型？
 
-  // Get type for CollectionValue
-  codegen->collection_value_type_ = codegen->GetStructType<CollectionValue>();
+  // Get type for CollectionValue   IMPALA-11643 issue
+  codegen->collection_value_type_ = codegen->GetStructType<CollectionValue>(); // 返回的是不是CollectionValue 类型Lowered后的类型？
 
   // Verify size is correct
   const llvm::DataLayout& data_layout = codegen->execution_engine()->getDataLayout();
@@ -570,7 +570,7 @@ string LlvmCodeGen::GetIR(bool full_module) const {
   return str;
 }
 
-llvm::Type* LlvmCodeGen::GetSlotType(const ColumnType& type) {
+llvm::Type* LlvmCodeGen::GetSlotType(const ColumnType& type) {  // different from   static inline int GetSlotSize(const ColumnType& col_type) // 返回的是不是lowered后的类型？IMPALA-11643 issue
   switch (type.type) {
     case TYPE_NULL:
       return llvm::Type::getInt1Ty(context());
@@ -598,7 +598,7 @@ llvm::Type* LlvmCodeGen::GetSlotType(const ColumnType& type) {
     case TYPE_TIMESTAMP:
       return timestamp_value_type_;
     case TYPE_DECIMAL:
-      return llvm::Type::getIntNTy(context(), type.GetByteSize() * 8);
+      return llvm::Type::getIntNTy(context(), type.GetByteSize() * 8); // 参见be/src/runtime/types.h的 static inline int GetByteSize(const ColumnType& col_type)。该函数又descriptors.cc计算tuple时调用
     case TYPE_DATE:
       return i32_type();
     case TYPE_ARRAY:
@@ -869,7 +869,7 @@ llvm::Function* LlvmCodeGen::FnPrototype::GeneratePrototype(
 Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
     const ColumnType* return_type, const vector<ColumnType>& arg_types,
     int num_fixed_args, bool has_varargs, llvm::Function** llvm_fn,
-    LibCacheEntry** cache_entry) {
+    LibCacheEntry** cache_entry) {  // 加载的都是符合udf接口规范的函数，即都带有FunctionContext参数，只是加载的有可能是hdfs文件中的so,hdfs文件中的ir,或者内置ir。参见：be/src/codegen/codegen-anyval.md
   DCHECK_GE(arg_types.size(), num_fixed_args);
   DCHECK(has_varargs || arg_types.size() == num_fixed_args);
   DCHECK(!has_varargs || arg_types.size() > num_fixed_args);
@@ -900,15 +900,15 @@ Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
     bool is_decimal = return_type != NULL && return_type->type == TYPE_DECIMAL;
     llvm::Type* llvm_return_type = return_type == NULL || is_decimal ?
         void_type() :
-        CodegenAnyVal::GetLoweredType(this, *return_type);
+        CodegenAnyVal::GetLoweredType(this, *return_type);   // 与下面的不同，获取lowered类型
 
     // Convert UDF function pointer to Function*. Start by creating a function
     // prototype for it.
     FnPrototype prototype(this, symbol, llvm_return_type);
 
-    if (is_decimal) {
+    if (is_decimal) {// 因为so中的返回DecimalVal的函数都被g++等编译器调整了函数签名。所以此处生成的llvm_fn也应该按照调整后的函数签名配置
       // Per the x64 ABI, DecimalVals are returned via a DecmialVal* output argument
-      llvm::Type* output_type = CodegenAnyVal::GetUnloweredPtrType(this, *return_type);
+      llvm::Type* output_type = CodegenAnyVal::GetUnloweredPtrType(this, *return_type);   // 获取unlowered类型
       prototype.AddArgument("output", output_type);
     }
 
@@ -918,7 +918,7 @@ Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
     // The "fixed" arguments for the UDF function, followed by the variable arguments,
     // if any.
     for (int i = 0; i < num_fixed_args; ++i) {
-      llvm::Type* arg_type = CodegenAnyVal::GetUnloweredPtrType(this, arg_types[i]);
+      llvm::Type* arg_type = CodegenAnyVal::GetUnloweredPtrType(this, arg_types[i]);    // 获取unlowered类型
       prototype.AddArgument(Substitute("fixed_arg_$0", i), arg_type);
     }
 
@@ -941,7 +941,7 @@ Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
 #endif
     // Associate the dynamically loaded function pointer with the Function* we defined.
     // This tells LLVM where the compiled function definition is located in memory.
-    execution_engine()->addGlobalMapping(*llvm_fn, fn_ptr);
+    execution_engine()->addGlobalMapping(*llvm_fn, fn_ptr);  // llvm_fn编译出的二进制和fn_ptr对应的二进制是一样的，参见CodegenAnyVal.md。C++ 类型是源码层的抽象，IR 类型是LLVM 的中间表示层抽象，机器码是硬件执行层的实际指令
     // Disable the codegen cache because codegen cache uses the llvm module bitcode as
     // the key while the bitcode doesn't contain the global function mapping of the
     // execution engine. If the mapping is changed during running, like udf recreation,
@@ -949,12 +949,12 @@ Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
     // crash while calling the udf,  so block the codegen cache for native udfs.
     // Builtin functions should not have the issue, because they should not change
     // during runtime.
-    if (fn.binary_type == TFunctionBinaryType::NATIVE) {
+    if (fn.binary_type == TFunctionBinaryType::NATIVE) {   // Native-interface, precompiled UDFs loaded from *.so
       // Should be before compilation.
       DCHECK(!is_compiled_);
       codegen_cache_enabled_ = false;
     }
-  } else if (fn.binary_type == TFunctionBinaryType::BUILTIN) {
+  } else if (fn.binary_type == TFunctionBinaryType::BUILTIN) {// Impala builtin. We can either run this interpreted or via codegen// depending on the query option.
     // In this path, we're running a builtin with the UDF interface. The IR is
     // in the llvm module. Builtin functions may use Expr::GetConstant(). Clone the
     // function so that we can replace constants in the copied function.
@@ -970,7 +970,7 @@ Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
     (*llvm_fn)->setName(demangled_name);
   } else {
     // We're running an IR UDF.
-    DCHECK_EQ(fn.binary_type, TFunctionBinaryType::IR);
+    DCHECK_EQ(fn.binary_type, TFunctionBinaryType::IR);  // Native-interface, precompiled to IR; loaded from *.ll
 
     // Link the UDF module into this query's main module so the UDF's functions are
     // available in the main module.

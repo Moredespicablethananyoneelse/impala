@@ -648,7 +648,7 @@ TimestampVal DecimalOperators::ConvertToTimestampVal(
   if (decimal_value.is_negative()) nanoseconds *= -1;
   TimestampVal result;
   TimestampValue::FromUnixTimeNanos(
-      seconds, nanoseconds, local_tz).ToTimestampVal(&result);
+      seconds, nanoseconds, local_tz).ToTimestampVal(&result);  // 先生成*Value，再转换成*Val类型
   return result;
 }
 

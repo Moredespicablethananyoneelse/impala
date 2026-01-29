@@ -25,7 +25,7 @@ namespace impala {
 
 void NonWritableBasicBlock::BranchTo(LlvmBuilder* builder) const {
   DCHECK(builder != nullptr);
-  builder->CreateBr(basic_block_);
+  builder->CreateBr(basic_block_);//一条无条件分支指令（Br，即 Branch 的缩写）
 }
 
 void NonWritableBasicBlock::BranchToIf(LlvmBuilder* builder,
@@ -143,7 +143,7 @@ void CodegenAnyValReadWriteInfo::CodegenConvertToCanonicalForm() {
 
 llvm::Value* CodegenAnyValReadWriteInfo::CodegenGetFnCtx() const {
   llvm::Function* const get_func_ctx_fn =
-      codegen_->GetFunction(IRFunction::GET_FUNCTION_CTX, false);
+      codegen_->GetFunction(IRFunction::GET_FUNCTION_CTX, false);  // impala_udf::FunctionContext* GetFunctionContext(impala::ScalarExprEvaluator*, int);
   return builder_->CreateCall(get_func_ctx_fn,
       {eval_, codegen_->GetI32Constant(fn_ctx_idx_)}, "fn_ctx");
 }

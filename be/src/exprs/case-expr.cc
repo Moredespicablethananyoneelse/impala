@@ -210,7 +210,7 @@ Status CaseExpr::GetCodegendComputeFnImpl(LlvmCodeGen* codegen, llvm::Function**
         context, "eval_case_expr", function, eval_first_when_expr_block);
     builder.SetInsertPoint(eval_case_expr_block);
     case_val = CodegenAnyVal::CreateCallWrapped(
-        codegen, &builder, children()[0]->type(), child_fns[0], args, "case_val");
+        codegen, &builder, children()[0]->type(), child_fns[0], args, "case_val");  // 返回的是CodeAnyVal（里面包含*Val类型 lowered后的类型的值value_)
     builder.CreateCondBr(
         case_val.GetIsNull(), default_value_block, eval_first_when_expr_block);
   } else {
@@ -242,14 +242,14 @@ Status CaseExpr::GetCodegendComputeFnImpl(LlvmCodeGen* codegen, llvm::Function**
     // statement
     builder.SetInsertPoint(current_when_expr_block);
     CodegenAnyVal when_val = CodegenAnyVal::CreateCallWrapped(
-        codegen, &builder, GetChild(i)->type(), child_fns[i], args, "when_val");
+        codegen, &builder, GetChild(i)->type(), child_fns[i], args, "when_val");   // 返回的是CodeAnyVal（里面包含*Val 类型lowered后的类型值value_)
     builder.CreateCondBr(
         when_val.GetIsNull(), continue_or_exit_block, check_when_expr_block);
 
     builder.SetInsertPoint(check_when_expr_block);
     if (has_case_expr()) {
       // Compare for equality
-      llvm::Value* is_equal = case_val.Eq(&when_val);
+      llvm::Value* is_equal = case_val.Eq(&when_val);    // 两个CodegenAnyVal比较（这两个CodengenAnyVal内部都包含*Val类型lowered后类型的值），调用的也是CodegenAnyVal的成员函数Eq
       builder.CreateCondBr(is_equal, return_then_expr_block, continue_or_exit_block);
     } else {
       builder.CreateCondBr(
@@ -260,7 +260,7 @@ Status CaseExpr::GetCodegendComputeFnImpl(LlvmCodeGen* codegen, llvm::Function**
 
     // Eval and return then value
     llvm::Value* then_val =
-        CodegenAnyVal::CreateCall(codegen, &builder, child_fns[i + 1], args, "then_val");
+        CodegenAnyVal::CreateCall(codegen, &builder, child_fns[i + 1], args, "then_val");   // 返回的是*Val类型lowered后的类型的值 
     builder.CreateRet(then_val);
 
     current_when_expr_block = continue_or_exit_block;
@@ -269,10 +269,10 @@ Status CaseExpr::GetCodegendComputeFnImpl(LlvmCodeGen* codegen, llvm::Function**
   builder.SetInsertPoint(default_value_block);
   if (has_else_expr()) {
     llvm::Value* else_val = CodegenAnyVal::CreateCall(
-        codegen, &builder, child_fns[num_children - 1], args, "else_val");
-    builder.CreateRet(else_val);
+        codegen, &builder, child_fns[num_children - 1], args, "else_val");  
+    builder.CreateRet(else_val);   // 返回的是*Val类型lowered后的类型的值 
   } else {
-    builder.CreateRet(CodegenAnyVal::GetNullVal(codegen, type()));
+    builder.CreateRet(CodegenAnyVal::GetNullVal(codegen, type())); // 返回的是*Val类型lowered后的类型的值 
   }
   *fn = codegen->FinalizeFunction(function);
   if (UNLIKELY(*fn == nullptr)) return Status(TErrorCode::IR_VERIFY_FAILED, "CaseExpr");

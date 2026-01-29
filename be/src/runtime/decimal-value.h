@@ -188,10 +188,10 @@ class __attribute__ ((packed)) DecimalValue {
     value_ = value;
   }
 
-  /// Returns the value of the decimal before the decimal point.
+  /// Returns the value of the decimal before the decimal point.  // 整数部分
   inline const T whole_part(int scale) const;
 
-  /// Returns the value of the decimal after the decimal point.
+  /// Returns the value of the decimal after the decimal point.  // 小数部分
   inline const T fractional_part(int scale) const;
 
   /// Returns the value as an integer, setting overflow to true on overflow,

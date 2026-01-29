@@ -85,7 +85,7 @@ llvm::Type* CodegenAnyVal::GetLoweredType(LlvmCodeGen* cg, const ColumnType& typ
     case TYPE_MAP: // CollectionVal has same memory layout as StringVal.
     case TYPE_STRUCT: // StructVal has same memory layout as StringVal.
 #ifndef __aarch64__
-      return llvm::StructType::get(cg->i64_type(), cg->ptr_type());
+      return llvm::StructType::get(cg->i64_type(), cg->ptr_type());  // 查看IMPALA-11643 issue  //  查看codegen->string_value_type_ 
 #else
       return llvm::ArrayType::get(cg->i64_type(), 2);
 #endif
@@ -214,12 +214,12 @@ CodegenAnyVal CodegenAnyVal::CreateCallWrapped(LlvmCodeGen* cg, LlvmBuilder* bui
     const ColumnType& type, llvm::Function* fn, llvm::ArrayRef<llvm::Value*> args,
     const char* name) {
   llvm::Value* v = CreateCall(cg, builder, fn, args, name);
-  return CodegenAnyVal(cg, builder, type, v, name);
+  return CodegenAnyVal(cg, builder, type, v, name);    // v应该是lowered后的类型
 }
 
 CodegenAnyVal::CodegenAnyVal(LlvmCodeGen* codegen, LlvmBuilder* builder,
     const ColumnType& type, llvm::Value* value, const char* name)
-  : type_(type), value_(value), name_(name), codegen_(codegen), builder_(builder) {
+  : type_(type), value_(value), name_(name), codegen_(codegen), builder_(builder) { // 输入参数value是lowered后的值。返回值是封装了lowered后的值的value_的CodegenAnyVal
   llvm::Type* value_type = GetLoweredType(codegen, type);
   if (value_ == NULL) {
     // No Value* was specified, so allocate one on the stack and load it.
@@ -229,7 +229,7 @@ CodegenAnyVal::CodegenAnyVal(LlvmCodeGen* codegen, LlvmBuilder* builder,
   DCHECK_EQ(value_->getType(), value_type);
 }
 
-llvm::Value* CodegenAnyVal::GetIsNull(const char* name) const {
+llvm::Value* CodegenAnyVal::GetIsNull(const char* name) const {  // 返回lowered后的值
   switch (type_.type) {
     case TYPE_BIGINT:
     case TYPE_DOUBLE: {
@@ -241,7 +241,7 @@ llvm::Value* CodegenAnyVal::GetIsNull(const char* name) const {
 #else
       DCHECK(is_null->getType() == codegen_->i64_type());
 #endif
-      return builder_->CreateTrunc(is_null, codegen_->bool_type(), name);
+      return builder_->CreateTrunc(is_null, codegen_->bool_type(), name);  // 将i8或者i8或者i64转换成i1
     }
     case TYPE_DECIMAL: {
       // Lowered type is of the form { {i8}, ... }
@@ -277,7 +277,7 @@ llvm::Value* CodegenAnyVal::GetIsNull(const char* name) const {
   }
 }
 
-void CodegenAnyVal::SetIsNull(llvm::Value* is_null) {
+void CodegenAnyVal::SetIsNull(llvm::Value* is_null) {   // 输入是lowered后的值i1
   switch(type_.type) {
     case TYPE_BIGINT:
     case TYPE_DOUBLE: {
@@ -285,7 +285,7 @@ void CodegenAnyVal::SetIsNull(llvm::Value* is_null) {
       // On aarch64, lowered type is of form { i64, * }
 #ifndef __aarch64__
       llvm::Value* is_null_ext =
-          builder_->CreateZExt(is_null, codegen_->i8_type(), "is_null_ext");
+          builder_->CreateZExt(is_null, codegen_->i8_type(), "is_null_ext");// 将输入参数i1扩展到i8
 #else
       llvm::Value* is_null_ext =
           builder_->CreateZExt(is_null, codegen_->i64_type(), "is_null_ext");
@@ -339,7 +339,7 @@ void CodegenAnyVal::SetIsNull(llvm::Value* is_null) {
   }
 }
 
-llvm::Value* CodegenAnyVal::GetVal(const char* name) {
+llvm::Value* CodegenAnyVal::GetVal(const char* name) {  // 返回的也是lowered后的值
   DCHECK(type_.type != TYPE_STRING)
       << "Use GetPtr and GetLen for StringVal";
   DCHECK(type_.type != TYPE_VARCHAR)
@@ -365,22 +365,22 @@ llvm::Value* CodegenAnyVal::GetVal(const char* name) {
       llvm::Value* val = GetHighBits(num_bits, value_, name);
       if (type_.type == TYPE_BOOLEAN) {
         // Return booleans as i1 (vs. i8)
-        val = builder_->CreateTrunc(val, builder_->getInt1Ty(), name);
+        val = builder_->CreateTrunc(val, builder_->getInt1Ty(), name);    // 转换成i1
       }
       return val;
     }
     case TYPE_FLOAT: {
       // Same as above, but we must cast the value to a float.
       llvm::Value* val = GetHighBits(32, value_);
-      return builder_->CreateBitCast(val, codegen_->float_type());
+      return builder_->CreateBitCast(val, codegen_->float_type());  // 转换成llvm ir的float类型，不是c++中的float类型，本质上都是cpu原生支持的double类型。这里我为这两者做了区分
     }
     case TYPE_BIGINT:
       return builder_->CreateExtractValue(value_, 1, name);
     case TYPE_DOUBLE: {
       // Lowered type is of form { i8, * }. Get the second value.
-      llvm::Value* val = builder_->CreateExtractValue(value_, 1, name);
+      llvm::Value* val = builder_->CreateExtractValue(value_, 1, name);  // x86-64	{i8, double}（结构体）
 #ifdef __aarch64__
-      val = builder_->CreateBitCast(val, codegen_->double_type());
+      val = builder_->CreateBitCast(val, codegen_->double_type());  // aarch64	{i64, i64}（结构体 / 数组），所以需要将llvm ir类型转换成llvm ir的double类型（这和c++中的double类型本质一样，都是cpu原生支持的符合ieee954的double类型，我在这单独做了区分）
 #endif
       return val;
     }
@@ -396,7 +396,7 @@ llvm::Value* CodegenAnyVal::GetVal(const char* name) {
       // (The {i128} corresponds to the union of the different width int types.)
       llvm::Value* val = builder_->CreateExtractValue(value_, idxs, name);
       return builder_->CreateTrunc(val,
-          codegen_->GetSlotType(type_), name);
+          codegen_->GetSlotType(type_), name);  //   Value *CreateTrunc(Value *V, Type *DestTy, const Twine &Name = "",bool IsNUW = false, bool IsNSW = false) 
     }
     default:
       DCHECK(false) << "Unsupported type: " << type_;
@@ -404,7 +404,7 @@ llvm::Value* CodegenAnyVal::GetVal(const char* name) {
   }
 }
 
-void CodegenAnyVal::SetVal(llvm::Value* val) {
+void CodegenAnyVal::SetVal(llvm::Value* val) {  // 输入的是lowered后的值
   DCHECK(type_.type != TYPE_STRING) << "Use SetPtr and SetLen for StringVals";
   DCHECK(type_.type != TYPE_VARCHAR) << "Use SetPtr and SetLen for StringVals";
   DCHECK(type_.type != TYPE_CHAR) << "Use SetPtr and SetLen for StringVals";
@@ -460,12 +460,12 @@ void CodegenAnyVal::SetVal(llvm::Value* val) {
   }
 }
 
-void CodegenAnyVal::SetVal(bool val) {
+void CodegenAnyVal::SetVal(bool val) {  // 输入值是lowered前的值
   DCHECK_EQ(type_.type, TYPE_BOOLEAN);
   SetVal(builder_->getInt1(val));
 }
 
-void CodegenAnyVal::SetVal(int8_t val) {
+void CodegenAnyVal::SetVal(int8_t val) { // 输入值是lowered前的值。
   DCHECK_EQ(type_.type, TYPE_TINYINT);
   SetVal(builder_->getInt8(val));
 }
@@ -520,7 +520,7 @@ llvm::Value* CodegenAnyVal::GetLen() {
   return GetHighBits(32, v);
 }
 
-void CodegenAnyVal::SetPtr(llvm::Value* ptr) {
+void CodegenAnyVal::SetPtr(llvm::Value* ptr) {  // 入参是llvm ir层面的指针。llvm指针和c++指针是不能直接相互转换的
   // Set the second pointer value to 'ptr'.
   DCHECK(type_.IsStringType() || type_.type == TYPE_FIXED_UDA_INTERMEDIATE
       || type_.IsCollectionType() || type_.IsStructType());
@@ -621,7 +621,7 @@ llvm::Value* CodegenAnyVal::GetLoweredPtr(const string& name) const {
   return lowered_ptr;
 }
 
-llvm::Value* CodegenAnyVal::GetUnloweredPtr(const string& name) const {
+llvm::Value* CodegenAnyVal::GetUnloweredPtr(const string& name) const {  //Load被函数 Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol, const ColumnType* return_type, const vector<ColumnType>& arg_types, int num_fixed_args, bool has_varargs, llvm::Function** llvm_fn, LibCacheEntry** cache_entry) 调用
   // Get an unlowered pointer by creating a lowered pointer then bitcasting it.
   // TODO: if the original value was unlowered, this generates roundabout code that
   // lowers the value and casts it back. Generally LLVM's optimiser can reason
@@ -636,7 +636,7 @@ llvm::Value* CodegenAnyVal::GetAnyValPtr(const std::string& name) const {
       GetLoweredPtr(), GetAnyValPtrType(codegen_), name);
 }
 
-llvm::Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {
+llvm::Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {  // 返回值是lowered的类型i1
   DCHECK_EQ(type_, other->type_);
   switch (type_.type) {
     case TYPE_BOOLEAN:
@@ -646,25 +646,25 @@ llvm::Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {
     case TYPE_BIGINT:
     case TYPE_DECIMAL:
     case TYPE_DATE:
-      return builder_->CreateICmpEQ(GetVal(), other->GetVal(), "eq");
+      return builder_->CreateICmpEQ(GetVal(), other->GetVal(), "eq");  // “整数比较 - 等于”（ICmpEQ）相关操作（常见于 LLVM 等中间代码生成场景）；
     case TYPE_FLOAT:
     case TYPE_DOUBLE:
       // Use the ordering version "OEQ" to ensure that 'nan' != 'nan'.
-      return builder_->CreateFCmpOEQ(GetVal(), other->GetVal(), "eq");
+      return builder_->CreateFCmpOEQ(GetVal(), other->GetVal(), "eq");  // 比较逻辑：判断GetVal()获取的当前值与other->GetVal()获取的另一值是否浮点数相等（FCmpOEQ 中 “OEQ” 即 “Ordered Equal”，指有序浮点数相等，排除 NaN 等特殊情况）
     case TYPE_STRING:
     case TYPE_VARCHAR:
     case TYPE_FIXED_UDA_INTERMEDIATE: {
       llvm::Function* eq_fn =
-          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VAL_EQ, false);
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VAL_EQ, false);   // 调用的是预编译的IR函数（StringValue的成员函数）
       return builder_->CreateCall(eq_fn,
-          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}),
+          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}), //  // 所以参数都是llvm ir层面的unlowered type的指针（不是lowered类型的指针，更不是c++层面的指针）
           "eq");
     }
     case TYPE_TIMESTAMP: {
       llvm::Function* eq_fn =
-          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VAL_EQ, false);
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VAL_EQ, false);   // 调用的是预编译的IR函数（TimestampValue的成员函数）
       return builder_->CreateCall(eq_fn,
-          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}),
+          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}),  // 所以参数都是llvm ir层面的unlowered type的指针（不是lowered类型的指针，更不是c++层面的指针）
           "eq");
     }
     default:
@@ -674,7 +674,7 @@ llvm::Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {
 }
 
 llvm::Value* CodegenAnyVal::EqToNativePtr(llvm::Value* native_ptr,
-    bool inclusive_equality) {
+    bool inclusive_equality) {  // native_ptr也是llvm ir层面的指针，只不过指向的是TimestampValue这种*value类型的数据。而不是impala_udf::AnyValue或者CodegenAnyValue成员变量value_代表的lowered类型的数据。还需要注意这个函数编译成二进制后，是可以传入c++指针的。因为这个llvm ir层面的函数编译成二进制后和c++版本（如果有的话）编译成的函数二进制是相同的
   llvm::Value* val = NULL;
   if (!type_.IsStringType()) {
      val = builder_->CreateLoad(native_ptr);
@@ -712,13 +712,13 @@ llvm::Value* CodegenAnyVal::EqToNativePtr(llvm::Value* native_ptr,
       llvm::Function* eq_fn =
           codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VALUE_EQ, false);
       return builder_->CreateCall(eq_fn,
-          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw");
+          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw"); // StringVal和StringValue两种不同类型比较，调用的是bool StringValueEq(const StringVal& x, const StringValue& y) 
     }
     case TYPE_TIMESTAMP: {
       llvm::Function* eq_fn =
           codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VALUE_EQ, false);
       return builder_->CreateCall(eq_fn,
-          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw");
+          llvm::ArrayRef<llvm::Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw"); // TimestampVal和TimestampValue比较？调用的是bool TimestampValueEq(const TimestampVal& x, const TimestampValue& y) 
     }
     default:
       DCHECK(false) << "NYI: " << type_.DebugString();
@@ -738,7 +738,7 @@ llvm::Value* CodegenAnyVal::Compare(CodegenAnyVal* other, const char* name) {
   llvm::Constant* type_ptr =
       codegen_->ConstantToGVPtr(col_type, type_.ToIR(codegen_), "type");
   llvm::Function* compare_fn =
-      codegen_->GetFunction(IRFunction::RAW_VALUE_COMPARE, false);
+      codegen_->GetFunction(IRFunction::RAW_VALUE_COMPARE, false);  // static int impala::RawValue::Compare(const void* lhs, const void* rhs, const impala::ColumnType& type);
   llvm::Value* args[] = {void_v1, void_v2, type_ptr};
   return builder_->CreateCall(compare_fn, args, name);
 }
@@ -790,10 +790,10 @@ llvm::Value* CodegenAnyVal::GetNullVal(LlvmCodeGen* codegen, const ColumnType& t
 llvm::Value* CodegenAnyVal::GetNullVal(LlvmCodeGen* codegen, llvm::Type* val_type) {
   if (val_type->isStructTy()) {
     llvm::StructType* struct_type = llvm::cast<llvm::StructType>(val_type);
-    if (struct_type->getNumElements() == 3) {
+    if (struct_type->getNumElements() == 3) {   // 
       DCHECK_EQ(val_type, codegen->GetNamedType(LLVM_DECIMALVAL_NAME));
       // Return the struct { {1}, 0, 0 } (the 'is_null' byte, i.e. the first value's first
-      // byte, is set to 1, the other bytes don't matter)
+      // byte, is set to 1, the other bytes don't matter)x86-64	{ {i8（1B）}, [15×i8（15B）], {i128（16B）} }	最内层 {i8}：1=NULL，0 = 非 NULL	第 3 字段（i128）：存储无标度十进制值	第 2 字段（15B）：内存对齐填充 总长度 1+15+16=32B（对齐后）
       llvm::StructType* anyval_struct_type =
           llvm::cast<llvm::StructType>(struct_type->getElementType(0));
       llvm::Type* is_null_type = anyval_struct_type->getElementType(0);
@@ -805,7 +805,7 @@ llvm::Value* CodegenAnyVal::GetNullVal(LlvmCodeGen* codegen, llvm::Type* val_typ
           llvm::Constant::getNullValue(type2), llvm::Constant::getNullValue(type3));
     }
 #ifdef __aarch64__
-    else if (struct_type->getElementType(0)->isStructTy()) {
+    else if (struct_type->getElementType(0)->isStructTy()) {  // aarch64	{ {i8（1B）}, {i128（16B）} }	最内层 {i8}：1=NULL，0 = 非 NULL	第 2 字段（i128）：存储无标度十进制值	无	总长度 1+16=17B（对齐后 32B）
       llvm::StructType* anyval_struct_type =
           llvm::cast<llvm::StructType>(struct_type->getElementType(0));
       llvm::Type* is_null_type = anyval_struct_type->getElementType(0);
@@ -824,7 +824,7 @@ llvm::Value* CodegenAnyVal::GetNullVal(LlvmCodeGen* codegen, llvm::Type* val_typ
     llvm::Type* type2 = struct_type->getElementType(1);
     return llvm::ConstantStruct::get(struct_type, llvm::ConstantInt::get(type1, 1),
         llvm::Constant::getNullValue(type2));
-  }
+  }   //  if (val_type->isStructTy()) 
 #ifdef __aarch64__
   if (val_type->isArrayTy()) {
     llvm::ArrayType* array_type = llvm::cast<llvm::ArrayType>(val_type);

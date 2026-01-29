@@ -251,7 +251,7 @@ struct ColumnType {
   }
 
   /// Returns the IR version of this ColumnType. Only implemented for scalar types. LLVM
-  /// optimizer can pull out fields of the returned ConstantStruct for constant folding.
+  /// optimizer can pull out fields of the returned ConstantStruct for constant folding./// 返回此 ColumnType 的 IR 版本。仅针对标量类型实现。LLVM 优化器可以提取返回的 ConstantStruct 的字段以进行常量折叠。
   llvm::ConstantStruct* ToIR(LlvmCodeGen* codegen) const;
 
   std::string DebugString() const;

@@ -95,12 +95,13 @@ class NonWritableBasicBlock {
 /// that other IR code can branch to it), perform NULL checking and branch to 'null_block'
 /// and 'non_null_block' accordingly. The source is responsible for creating these blocks.
 /// It is allowed to create more blocks, but these blocks should not be missing.
+/// ( me.for exmpale CodegenAnyValReadWriteInfo CodegenAnyVal::ToReadWriteInfo() is a source )
 ///
 /// A destination should be able to rely on this structure, i.e. it should be able to
 /// branch to 'entry_block' and to generate code in 'null_block' and 'non_null_block' to
 /// write the value. It is also allowed to generate additional blocks but it should not
 /// write into 'entry_block' or assume that the source only used the above mentioned
-/// blocks.
+/// blocks.( me.for example void SlotDescriptor::CodegenWriteToSlotHelper(const CodegenAnyValReadWriteInfo& read_write_info, llvm::Value* main_tuple_llvm_struct_ptr, llvm::Value* tuple_llvm_struct_ptr, llvm::Value* pool_val, const NonWritableBasicBlock& insert_before))
 ///
 /// Structs are represented recursively. The fields 'codegen', 'builder' and 'type' should
 /// be filled by the source so that the destination can use them to generate IR code.

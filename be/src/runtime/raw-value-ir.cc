@@ -28,7 +28,7 @@
 using namespace impala;
 
 int IR_ALWAYS_INLINE RawValue::Compare(
-    const void* v1, const void* v2, const ColumnType& type) noexcept {
+    const void* v1, const void* v2, const ColumnType& type) noexcept {  // 被llvm::Value* CodegenAnyVal::Compare(CodegenAnyVal* other, const char* name)调用
   const StringValue* string_value1;
   const StringValue* string_value2;
   const TimestampValue* ts_value1;

@@ -270,7 +270,7 @@ void* ScalarExprEvaluator::GetValue(const TupleRow* row) {
   return GetValue(root_, row);
 }
 
-void* ScalarExprEvaluator::GetValue(const ScalarExpr& expr, const TupleRow* row) {
+void* ScalarExprEvaluator::GetValue(const ScalarExpr& expr, const TupleRow* row) { //除了整数类型外，返回类型是*Value类型，也就是完成了从*Val到*Value的转换
   switch (expr.type_.type) {
     case TYPE_BOOLEAN: {
       impala_udf::BooleanVal v = expr.GetBooleanVal(this, row); // 说明了ScalarExpr的返回值是*Val类型
@@ -318,8 +318,8 @@ void* ScalarExprEvaluator::GetValue(const ScalarExpr& expr, const TupleRow* row)
     case TYPE_VARCHAR: {
       impala_udf::StringVal v = expr.GetStringVal(this, row);
       if (v.is_null) return nullptr;
-      result_.string_val.Assign(reinterpret_cast<char*>(v.ptr), v.len);
-      return &result_.string_val;
+      result_.string_val.Assign(reinterpret_cast<char*>(v.ptr), v.len);  // 完成从StringVal到StringValue的转换
+      return &result_.string_val;  // 返回类型StringValue
     }
     case TYPE_CHAR:
     case TYPE_FIXED_UDA_INTERMEDIATE: {
@@ -331,8 +331,8 @@ void* ScalarExprEvaluator::GetValue(const ScalarExpr& expr, const TupleRow* row)
     case TYPE_TIMESTAMP: {
       impala_udf::TimestampVal v = expr.GetTimestampVal(this, row);
       if (v.is_null) return nullptr;
-      result_.timestamp_val = TimestampValue::FromTimestampVal(v);
-      return &result_.timestamp_val;
+      result_.timestamp_val = TimestampValue::FromTimestampVal(v);  // 完成了从TimestampVal到TimeStampValue的转换
+      return &result_.timestamp_val;  // 返回TimestampValue
     }
     case TYPE_DECIMAL: {
       DecimalVal v = expr.GetDecimalVal(this, row);

@@ -489,9 +489,9 @@ Status Tuple::CodegenMaterializeExprs(LlvmCodeGen* codegen, bool collect_varlen_
         slot_materialize_exprs[i]->type(), materialize_expr_fns[i], expr_args, "src");
 
     // Write expr result 'src' to slot
-    CodegenAnyValReadWriteInfo read_write_info = src.ToReadWriteInfo();
+    CodegenAnyValReadWriteInfo read_write_info = src.ToReadWriteInfo();  // 将CodegenAnyVal的数据封装到CodegenAnyValReadWriteInfo中
     slot_desc->CodegenWriteToSlot(
-        read_write_info, tuple, use_mem_pool ? pool_arg : nullptr);
+        read_write_info, tuple, use_mem_pool ? pool_arg : nullptr);  // 将CodegenAnyValReadWriteInfo中的存储的数据写入tuple的执行位置（即该slot_desc指定的位置）
   }
   builder.CreateRetVoid();
   // TODO: if pool != NULL, OptimizeFunctionWithExprs() is inlining the Allocate()

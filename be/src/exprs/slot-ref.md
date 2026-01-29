@@ -11,5 +11,10 @@
       tuple中存放的是DecimalValue值，这个函数从tuple中读取DecimalVal.用于解释执行路径
 
 打算梳理这几种类型的关系，请参考slot-ref和tuple的实现，以及scalar-expr-evaluator的实现。
+四则运算可以看fe/src/main/java/org/apache/impala/catalog/ScalarFunction.java
+             be/src/exprs/decimal-operators.h
+             [text](operators.h)
+
+
 *****************************************************************************************8
       

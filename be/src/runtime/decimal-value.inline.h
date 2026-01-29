@@ -89,12 +89,12 @@ inline int DecimalValue<T>::Compare(const DecimalValue& other) const {
 }
 
 template<typename T>
-inline const T DecimalValue<T>::whole_part(int scale) const {
+inline const T DecimalValue<T>::whole_part(int scale) const {   // 整数部分
   return value() / DecimalUtil::GetScaleMultiplier<T>(scale);
 }
 
 template<typename T>
-inline const T DecimalValue<T>::fractional_part(int scale) const {
+inline const T DecimalValue<T>::fractional_part(int scale) const {   // 小数部分
   return abs(value()) % DecimalUtil::GetScaleMultiplier<T>(scale);
 }
 

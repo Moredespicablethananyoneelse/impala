@@ -306,7 +306,8 @@ class LlvmCodeGen {
 
   /// Alloca's an instance of the appropriate pointer type and sets it to point at 'v'
   llvm::Value* GetPtrTo(LlvmBuilder* builder, llvm::Value* v, const char* name = "");
-
+  /// 使用常量 “ir_constant” 创建一个全局值 “name”，并返回指向该全局值的指针。
+  /// 这在创建无法用基本类型（例如结构体）表示的常量函数参数时非常有用。
   /// Creates a global value 'name' using constant 'ir_constant' and returns
   /// a pointer to the global value. Useful for creating constant function arguments
   /// which cannot be represented with primitive types (e.g. struct).

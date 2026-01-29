@@ -88,7 +88,7 @@ CodegenAnyValReadWriteInfo 是一个面向 LLVM IR 代码生成的、基于控�
 ***************************************************************************
 这段代码：
 
-cpp
+cpp```
 llvm::ConstantStruct CodegenAnyValReadWriteInfo::GetIrType() const {
 // Delete the vectors in 'type_copy' because they are not used here and because they
 // cannot be converted to IR.
@@ -99,7 +99,7 @@ type_copy.field_names.clear();
 type_copy.field_ids.clear();
 return type_copy.ToIR(codegen_);
 }
-
+```
 其目的是 为当前 CodegenAnyValReadWriteInfo 所代表的数据类型生成一个 LLVM 常量结构体（llvm::ConstantStruct），该结构体是 ColumnType 类型在 LLVM IR 中的字面量表示。
 
 下面我们逐层拆解它的含义和背后的设计考量：

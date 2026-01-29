@@ -172,7 +172,7 @@ class DecimalOperators {
       const T& decimal_value, int scale, bool round, const Timezone* local_tz);
 
   /// Converts fractional 'val' with the given 'scale' to nanoseconds. Rounds
-  /// instead of truncating if 'round' is true.
+  /// instead of truncating if 'round' is true./// 将具有给定 “scale” 的小数 “val” 转换为纳秒。如果 “round” 为 true，则进行四舍五入而非截断。
   template <typename T>
   static int32_t ConvertToNanoseconds(T val, int scale, bool round);
 };

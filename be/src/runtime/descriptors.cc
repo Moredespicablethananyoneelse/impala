@@ -82,7 +82,7 @@ string NullIndicatorOffset::DebugString() const {
   return out.str();
 }
 
-llvm::Constant* NullIndicatorOffset::ToIR(LlvmCodeGen* codegen) const {
+llvm::Constant* NullIndicatorOffset::ToIR(LlvmCodeGen* codegen) const {   // 将 C++ 层面的 NullIndicatorOffset 结构体实例，转换为 LLVM IR 层面的常量结构体（便于 LLVM 后续进行常量传播等优化） 返回常量，便于常量传播
   llvm::StructType* null_indicator_offset_type =
       codegen->GetStructType<NullIndicatorOffset>();
   // Populate padding at end of struct with zeroes.
@@ -483,7 +483,7 @@ void RowDescriptor::InitTupleIdxMap() {
 
   tuple_idx_map_.resize(max_id + 1, INVALID_IDX);
   for (int i = 0; i < tuple_desc_map_.size(); ++i) {
-    tuple_idx_map_[tuple_desc_map_[i]->id()] = i;
+    tuple_idx_map_[tuple_desc_map_[i]->id()] = i;   // TupleId->tuple在row中的顺序号
   }
 }
 
@@ -572,7 +572,7 @@ Status DescriptorTbl::CreatePartKeyExprs(
     vector<ScalarExpr*> partition_key_value_exprs;
     RETURN_IF_ERROR(ScalarExpr::Create(part_desc->thrift_partition_key_exprs_,
          RowDescriptor(), nullptr, pool, &partition_key_value_exprs));
-    for (const ScalarExpr* partition_expr : partition_key_value_exprs) {
+    for (const ScalarExpr* partition_expr : partition_key_value_exprs) {// 参见descriptors.md
       DCHECK(partition_expr->IsLiteral());
       DCHECK(!partition_expr->HasFnCtx());
       DCHECK_EQ(partition_expr->GetNumChildren(), 0);
@@ -724,7 +724,7 @@ void DescriptorTbl::GetTupleDescs(vector<TupleDescriptor*>* descs) const {
   }
 }
 
-void SlotDescriptor::CodegenLoadAnyVal(CodegenAnyVal* any_val, llvm::Value* raw_val_ptr) {
+void SlotDescriptor::CodegenLoadAnyVal(CodegenAnyVal* any_val, llvm::Value* raw_val_ptr) {  // raw_val_ptr是llvm ir层面StringValue的指针，是将llvm ir层面的StringValue转换成llvm ir层面的CodengenVal
   DCHECK(raw_val_ptr->getType()->isPointerTy());
   llvm::Type* raw_val_type = raw_val_ptr->getType()->getPointerElementType();
   LlvmCodeGen* const codegen = any_val->codegen();
@@ -740,9 +740,9 @@ void SlotDescriptor::CodegenLoadAnyVal(CodegenAnyVal* any_val, llvm::Value* raw_
     case TYPE_VARCHAR: {
       // Convert StringValue to StringVal
       llvm::Function* str_ptr_fn = codegen->GetFunction(
-          IRFunction::STRING_VALUE_PTR, false);
+          IRFunction::STRING_VALUE_PTR, false);   // const char* StringValue::IrPtr() const;
       llvm::Function* str_len_fn = codegen->GetFunction(
-          IRFunction::STRING_VALUE_LEN, false);
+          IRFunction::STRING_VALUE_LEN, false);   // int StringValue::IrLen() const;
 
       llvm::Value* ptr = builder->CreateCall(str_ptr_fn,
           llvm::ArrayRef<llvm::Value*>({raw_val_ptr}), "ptr");
@@ -839,14 +839,14 @@ void SlotDescriptor::CodegenSetNullIndicator(
 
   llvm::ConstantInt* constant_is_null = llvm::dyn_cast<llvm::ConstantInt>(is_null);
   llvm::Value* result = nullptr;
-  if (constant_is_null != nullptr) {
+  if (constant_is_null != nullptr) {//编译时已知是否为 NULL (Constant Optimization)
     if (constant_is_null->isOne()) {
       result = builder->CreateOr(null_byte, mask, "null_bit_set");
     } else {
       DCHECK(constant_is_null->isZero());
       result = builder->CreateAnd(null_byte, not_mask, "null_bit_cleared");
     }
-  } else {
+  } else {  // 运行时才能确定 (Branchless Optimization)  如果 is_null 是运行时的布尔值，代码没有使用 if (is_null) ... else ... 这种会导致 CPU 分支预测失败的逻辑，而是使用了 无分支（Branchless） 计算
     // Avoid branching by computing the new byte as:
     // (null_byte & ~mask) | (-null & mask);
     llvm::Value* byte_with_cleared_bit =
@@ -854,7 +854,7 @@ void SlotDescriptor::CodegenSetNullIndicator(
     llvm::Value* sign_extended_null =
         builder->CreateSExt(is_null, codegen->i8_type());
     llvm::Value* bit_only = builder->CreateAnd(sign_extended_null, mask, "null_bit");
-    result = builder->CreateOr(byte_with_cleared_bit, bit_only, "null_bit_set");
+    result = builder->CreateOr(byte_with_cleared_bit, bit_only, "null_bit_set"); //  (null_byte & ~mask) | (-null & mask);
   }
 
   builder->CreateStore(result, null_byte_ptr);
@@ -911,7 +911,7 @@ void SlotDescriptor::CodegenSetNullIndicator(
 //   ; [insert point ends here]
 void SlotDescriptor::CodegenWriteToSlot(const CodegenAnyValReadWriteInfo& read_write_info,
     llvm::Value* tuple_llvm_struct_ptr, llvm::Value* pool_val,
-    llvm::BasicBlock* insert_before) const {
+    llvm::BasicBlock* insert_before) const {  // 将read_write_info中的值写入tuple_llvm_struct_ptr指向的tuple的该slot对象的位置
   DCHECK(tuple_llvm_struct_ptr->getType()->isPointerTy());
   DCHECK(tuple_llvm_struct_ptr->getType()->getPointerElementType()->isStructTy());
   LlvmBuilder* builder = read_write_info.builder();
@@ -1063,14 +1063,14 @@ CodegenAnyValReadWriteInfo CodegenAnyValToReadWriteInfo(CodegenAnyVal& any_val,
 void SlotDescriptor::CodegenStoreNonNullAnyVal(CodegenAnyVal& any_val,
       llvm::Value* raw_val_ptr, llvm::Value* pool_val,
       const SlotDescriptor* slot_desc, const NonWritableBasicBlock& insert_before) {
-  CodegenAnyValReadWriteInfo rwi = CodegenAnyValToReadWriteInfo(any_val, pool_val);
+  CodegenAnyValReadWriteInfo rwi = CodegenAnyValToReadWriteInfo(any_val, pool_val);   // 此处CodegenAnyValReadWriteInfo的数据来源是CodegenAnyVal，也可以是tuple中的数据
   CodegenStoreNonNullAnyVal(rwi, raw_val_ptr, pool_val, slot_desc, insert_before);
 }
 
 void SlotDescriptor::CodegenStoreNonNullAnyVal(
     const CodegenAnyValReadWriteInfo& read_write_info, llvm::Value* raw_val_ptr,
     llvm::Value* pool_val, const SlotDescriptor* slot_desc,
-    const NonWritableBasicBlock& insert_before) {
+    const NonWritableBasicBlock& insert_before) {  // raw_val_ptr 是llvm ir层面的slot指针。此函数将read_write_info中的数据写到raw_val_ptr指向的位置（有可能是tuple中slot的位置），也有可能是其他位置，比如其他表达式的输入
   LlvmBuilder* builder = read_write_info.builder();
   const ColumnType& type = read_write_info.type();
   switch (type.type) {
@@ -1084,20 +1084,20 @@ void SlotDescriptor::CodegenStoreNonNullAnyVal(
     }
     case TYPE_CHAR:
       read_write_info.codegen()->CodegenMemcpy(
-          builder, raw_val_ptr, read_write_info.GetPtrAndLen().ptr, type.len);
+          builder, raw_val_ptr, read_write_info.GetPtrAndLen().ptr, type.len);  // 在此处插入一条llvm ir层面的Instrinct的memcpy命令
       break;
     case TYPE_FIXED_UDA_INTERMEDIATE:
       DCHECK(false) << "FIXED_UDA_INTERMEDIATE does not need to be copied: the "
                     << "StringVal must be set up to point to the output slot";
       break;
     case TYPE_TIMESTAMP: {
-      llvm::Value* timestamp_value = CodegenToTimestampValue(read_write_info);
+      llvm::Value* timestamp_value = CodegenToTimestampValue(read_write_info); // 从read_write_inf获取值
       builder->CreateStore(timestamp_value, raw_val_ptr);
       break;
     }
     case TYPE_BOOLEAN: {
       llvm::Value* bool_as_i1 = builder->CreateTrunc(
-          read_write_info.GetSimpleVal(), builder->getInt1Ty(), "bool_as_i1");
+          read_write_info.GetSimpleVal(), builder->getInt1Ty(), "bool_as_i1");// 从read_write_info获取值，然后截断
       builder->CreateStore(bool_as_i1, raw_val_ptr);
       break;
     }
@@ -1132,7 +1132,7 @@ llvm::Value* SlotDescriptor::CodegenStoreNonNullAnyValToNewAlloca(
 }
 
 llvm::Value* SlotDescriptor::CodegenStoreNonNullAnyValToNewAlloca(
-      CodegenAnyVal& any_val, llvm::Value* pool_val) {
+      CodegenAnyVal& any_val, llvm::Value* pool_val) { // called in codegen-any.cc
   CodegenAnyValReadWriteInfo rwi = CodegenAnyValToReadWriteInfo(any_val, pool_val);
   return CodegenStoreNonNullAnyValToNewAlloca(rwi, pool_val);
 }

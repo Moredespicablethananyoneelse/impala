@@ -174,7 +174,7 @@ public:
   }
 
   /// Pads the end of the char pointer with spaces. num_chars is the number of used
-  /// characters, cptr_len is the length of cptr
+  /// characters, cptr_len is the length of cptr/// 用空格填充字符指针的末尾。num_chars 是已使用的字符数，cptr_len 是 cptr 的长度
   inline static void PadWithSpaces(char* cptr, int64_t cptr_len, int64_t num_chars);
 
   /// Returns number of characters in a char array (ignores trailing spaces)

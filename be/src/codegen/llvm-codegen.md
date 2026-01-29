@@ -2942,3 +2942,1213 @@ DecimalVal 是唯一允许不 lowered 的类型，原因前面说过：
 
 如果你想看某个类型 lowered 前后性能对比的理论分析，或者想讨论“如果只对部分类型 lowered 会怎样”，我可以继续展开。
 
+****************************************************************************************
+```cpp
+llvm::Constant* LlvmCodeGen::ConstantToGVPtr(
+    llvm::Type* type, llvm::Constant* ir_constant, const string& name) {
+  llvm::GlobalVariable* gv = new llvm::GlobalVariable(
+      *module_, type, true, llvm::GlobalValue::PrivateLinkage, ir_constant, name);
+  return llvm::ConstantExpr::getGetElementPtr(
+      NULL, gv, llvm::ArrayRef<llvm::Constant*>({GetI32Constant(0)}));
+}
+```
+函数 LlvmCodeGen::ConstantToGVPtr 简短总结
+该函数是 LlvmCodeGen 类的成员方法，核心功能是将 LLVM 常量（Constant）封装为全局变量（GlobalVariable），并返回指向该全局变量的指针常量（ConstantExpr），具体要点如下：
+输入参数：
+llvm::Type* type：目标全局变量的数据类型。
+llvm::Constant* ir_constant：需封装的 LLVM 常量（作为全局变量的初始值）。
+const string& name：全局变量的名称。
+核心操作 1：创建全局变量：
+调用 new llvm::GlobalVariable 创建全局变量 gv，参数特性包括：
+归属模块：当前 module_（函数所属类的成员，代表 LLVM 模块）。
+数据类型：传入的 type。
+常量属性：true（标记为常量全局变量，不可修改）。
+链接类型：llvm::GlobalValue::PrivateLinkage（仅模块内部可见，外部不可访问）。
+初始值：传入的 ir_constant。
+变量名称：传入的 name。
+核心操作 2：生成指针常量：
+调用 llvm::ConstantExpr::getGetElementPtr 生成 GEP（Get Element Pointer，取元素指针）指令常量，作用是获取全局变量 gv 的首地址（通过索引 {GetI32Constant(0)} 定位全局变量的第 0 个元素，即变量本身）。
+返回值：
+类型为 llvm::Constant*，实际是指向上述全局变量的 GEP 指针常量。
+
+要理解 llvm::ConstantExpr::getGetElementPtr 在这段代码中的参数含义，需先明确其核心作用：生成一个 “取元素指针” 的常量表达式（ConstantExpr），用于计算目标对象（此处是全局变量）的特定元素 / 成员的指针（本质是编译期可确定的常量指针）。
+结合你的代码片段，先给出该函数的通用签名（简化版），再逐参数拆解：
+cpp
+static Constant* getGetElementPtr(
+    Type* PointeeType,    // 参数1：被指针指向的对象的类型（可选）
+    Constant* PtrOperand, // 参数2：基指针（要计算偏移的原始指针）
+    ArrayRef<Constant*> Indices // 参数3：索引列表（用于计算指针偏移）
+);
+结合你的代码，逐参数详解
+你的调用代码：
+cpp
+llvm::ConstantExpr::getGetElementPtr(
+    NULL,  // 参数1
+    gv,    // 参数2
+    llvm::ArrayRef<llvm::Constant*>({GetI32Constant(0)}) // 参数3
+)
+1. 参数 1：NULL（被指针指向的对象类型，Type* PointeeType）
+作用：指定基指针（参数 2）所指向的 “对象类型”（即指针的 “指向类型”，ptr->pointee type）。
+取值规则：
+若传入 NULL（或 nullptr），LLVM 会自动从基指针（参数 2）的类型中推导（推荐用法，避免手动指定错误）；
+若手动传入，则必须与基指针的 “指向类型” 完全一致（否则编译报错）。
+你的代码场景：
+基指针 gv 是 GlobalVariable*，其指向类型就是你创建全局变量时传入的 type（比如 i32、struct X 等）。传入 NULL 让 LLVM 自动推导，简洁且不易出错。
+2. 参数 2：gv（基指针，Constant* PtrOperand）
+作用：作为 “起始指针”，后续所有索引的偏移计算都基于这个指针。
+要求：必须是一个 “指针类型的常量”（Constant* 且其类型是 PointerType）。
+你的代码场景：
+gv 是 GlobalVariable*，而 GlobalVariable 继承自 GlobalValue，GlobalValue 继承自 Constant，且其类型天然是 “指向全局变量数据类型的指针”（比如 i32*）。因此 gv 完全符合 “指针类型常量” 的要求，作为基指针表示 “全局变量的起始地址”。
+3. 参数 3：{GetI32Constant(0)}（索引列表，ArrayRef<Constant*>）
+作用：通过一系列索引，计算基指针的偏移量，最终得到目标元素 / 成员的指针。
+核心规则（LLVM GEP 指令的核心逻辑）：
+GEP 的索引是 “面向聚合类型（数组、结构体、向量）” 的，索引的数量和含义由基指针的 “指向类型” 决定：
+若基指针指向非聚合类型（如 i32、float，即 “标量类型”）：索引列表必须只有 1 个元素，且值必须是 0（表示 “取标量本身的地址”，无偏移）；
+若基指针指向数组类型（如 [10 x i32]）：第一个索引表示 “数组的第 N 个元素”（从 0 开始）；
+若基指针指向结构体类型（如 %struct.X = type {i32, float}）：索引表示 “结构体的第 N 个成员”（按定义顺序，从 0 开始）。
+你的代码场景：
+GetI32Constant(0) 生成一个 LLVM 常量 i32 0；
+索引列表只有 1 个元素 0，原因是：你创建的全局变量类型 type 是 “非聚合类型”（比如 i32、double 等，若 type 是聚合类型，索引列表需对应调整）；
+这个索引的含义是：“以 gv 为基地址，取其指向的标量类型的第 0 个元素（即标量本身）的地址”—— 本质就是 “全局变量 gv 的首地址”（因为标量类型没有多个元素，0 索引等价于直接取基地址）。
+为什么要这么写？（补充背景，帮你理解设计意图）
+你的函数 ConstantToGVPtr 要返回 “指向全局变量的指针常量”，而 gv 本身是 GlobalVariable*（全局变量的引用），但 LLVM 中直接用 gv 作为指针时，有时需要显式通过 GEP (0) 转换为 “指针常量表达式”（ConstantExpr），原因：
+统一指针表示：GEP 生成的 ConstantExpr 是 “纯粹的指针常量”，可直接用于需要 “编译期确定指针” 的场景（如常量折叠、全局变量初始化等）；
+兼容性：部分 LLVM API 要求传入 “指针类型的 ConstantExpr”，而非直接传入 GlobalVariable*（虽然 GlobalVariable 是 Constant，但通过 GEP 包装后更通用）。
+总结参数对应关系
+参数位置	传入值	含义	核心作用
+1	NULL	自动推导基指针的指向类型	简化代码，避免类型不匹配
+2	gv	全局变量的基指针（起始地址）	偏移计算的起始点
+3	{i32 0}	标量类型的 0 索引	取全局变量首地址（无偏移）
+本质上，这段代码的 GEP 调用等价于：“取全局变量 gv 的首地址，生成一个编译期可确定的指针常量”。
+﻿
+
+********************************************************************
+llvm::Type既能表示lowered前的类型，也能表示lowered后的类型对吗？
+
+是的，**`llvm::Type` 既能表示 lowered 前的类型，也能表示 lowered 后的类型**，这正是 LLVM 类型系统的核心设计之一。
+
+### 1. llvm::Type 的本质：它是一个“类型描述符”，不关心 lowered 与否
+
+在 LLVM IR 中，`llvm::Type` 是一个**抽象的类型表示**，它可以描述：
+
+- **高层 / 未 lowered 的类型**（用户定义的复杂 struct、union、class 等）
+- **底层 / 已 lowered 的类型**（i8/i16/i32/i64、float/double、指针、数组、向量等基础类型）
+
+同一个 `llvm::Type*` 对象，在不同阶段可以代表完全不同的语义：
+
+| 阶段                     | llvm::Type 代表的含义                              | 例子（以 Impala 为例）                                                                 |
+|--------------------------|----------------------------------------------------|-----------------------------------------------------------------------------------------|
+| **未 lowered（用户/C++ 视角）** | 原始 C++ 结构体类型（unlowered）                    | `%"struct.impala_udf::DecimalVal"`、`%"struct.impala_udf::StringVal"`                  |
+| **已 lowered（Impala codegen 内部）** | Impala 手动压平后的简化类型（lowered）             | `{ i64, i8* }`（StringVal）、`i64`（IntVal）、`[i64 x 2]`（ARM64 StringVal）           |
+| **LLVM 后端视角**        | 最终给机器码的类型（可能再被 TargetLowering 调整） | x86-64：`{i8, double}` 可能用 rax+xmm0 返回<br>ARM64：`[i64 x 2]` 用 x0-x1 或 NEON 向量 |
+
+**关键点**：  
+`llvm::Type` 本身**不区分 lowered / unlowered**，它只是一个“类型标签”。  
+同一个类型对象，在不同上下文下可以被解释为不同的含义。  
+Impala 通过 `GetLoweredType()` 和 `GetUnloweredType()` 这两个函数，明确区分了两种语义：
+
+```cpp
+// 未 lowered：原始 C++ 结构体名字（从模块中 GetNamedType 取）
+static llvm::Type* GetUnloweredType(...) {
+  return cg->GetNamedType(LLVM_STRINGVAL_NAME);  // "struct.impala_udf::StringVal"
+}
+
+// 已 lowered：Impala 手动压平后的简化类型（i64、{i64,i8*}、[i64 x 2] 等）
+static llvm::Type* GetLoweredType(...) {
+  case TYPE_STRING:  // lowered 后统一用 {i64, i8*} 或 [i64 x 2]
+#ifndef __aarch64__
+    return llvm::StructType::get(cg->i64_type(), cg->ptr_type());
+#else
+    return llvm::ArrayType::get(cg->i64_type(), 2);
+#endif
+}
+```
+
+### 2. 为什么同一个 llvm::Type 可以同时表示两种状态？
+
+因为 LLVM 的类型系统是**结构等价**（structural equivalence），而不是**名字等价**（nominal equivalence）：
+
+- 两个类型只要**内存布局相同**，LLVM 就认为它们是同一个类型。
+- 即使名字不同（一个叫 `struct.impala_udf::StringVal`，另一个叫匿名的 `{i64, i8*}`），只要字段顺序和类型一致，LLVM 后端就会把它们当成相同类型处理。
+- 所以：
+  - `GetUnloweredType()` 返回的 `struct.impala_udf::StringVal`（有名字）
+  - `GetLoweredType()` 返回的 `{i64, i8*}`（无名字，但布局一样）
+  在 LLVM 后端眼里，**本质上是同一个类型**（内存布局一致），可以互相 bitcast。
+
+### 3. Impala 为什么需要同时保留两种类型？
+
+Impala 在 codegen 中同时使用 lowered 和 unlowered 的原因，正是为了桥接两个世界：
+
+| 目的                              | 用哪种类型？          | 典型场景                                                                 |
+|-----------------------------------|-----------------------|--------------------------------------------------------------------------|
+| 与 native .so UDF 兼容            | unlowered             | LoadFunction() 时构建函数原型，必须匹配用户 .so 中的原始 `StringVal` 签名 |
+| 内部 JIT 计算和寄存器优化         | lowered               | CodegenAnyVal 内部用 `{i64, i8*}` 或 `[i64 x 2]`，用寄存器返回，避免 sret |
+| 调用 native 函数时桥接            | unlowered → lowered   | native 返回 `StringVal`，Impala 用 bitcast 转成 `{i64, i8*}` 继续计算     |
+| 生成 wrapper（DecimalVal 特殊处理）| unlowered → void + ptr | AddFunctionToJit() 中把 `DecimalVal func()` 包装成 `void func(DecimalVal*)` |
+
+**代码证据**（你贴的源码）：
+
+```cpp
+// LoadFunction() 用 unlowered 构建原型（匹配 native .so）
+llvm::Type* llvm_return_type = ... ? void_type() : CodegenAnyVal::GetUnloweredType(this, *return_type);
+prototype.AddArgument("output", CodegenAnyVal::GetUnloweredPtrType(this, *return_type));
+
+// CodegenAnyVal 用 lowered 类型操作
+llvm::Type* value_type = GetLoweredType(codegen, type);
+```
+
+### 4. 回答你的核心问题
+
+> llvm::Type 既能表示 lowered 前的类型，也能表示 lowered 后的类型对吗？
+
+**完全正确**。
+
+- `llvm::Type` 本身只是一个**布局描述符**，不关心“是否 lowered”。
+- Impala 通过 `GetLoweredType()` 和 `GetUnloweredType()` 人为区分了两种用法：
+  - unlowered：用于和 native 代码交互（函数签名、类型匹配）
+  - lowered：用于内部计算优化（寄存器返回、位操作、向量化）
+- 在 LLVM 后端眼里，它们只要布局相同，就可以互相转换（bitcast），所以同一个 `llvm::Type*` 可以同时代表两种语义。
+
+### 5. 总结一句话
+
+**是的**，`llvm::Type` 是中立的，它既可以表示原始的复杂 struct（unlowered），也可以表示 Impala 手动压平后的简化类型（lowered），关键看你用哪个函数去获取它（GetUnloweredType vs GetLoweredType），以及你用它做什么（native 兼容 vs 内部优化）。
+
+如果你想看某个具体类型（如 `StringVal`）在 lowered 和 unlowered 状态下的 `llvm::Type*` 打印结果（用 `LlvmCodeGen::Print()`），我可以帮你模拟出来。
+***************************************************************************
+```cpp
+
+Status LlvmCodeGen::LoadFunction(const TFunction& fn, const string& symbol,
+    const ColumnType* return_type, const vector<ColumnType>& arg_types,
+    int num_fixed_args, bool has_varargs, llvm::Function** llvm_fn,
+    LibCacheEntry** cache_entry) {
+  DCHECK_GE(arg_types.size(), num_fixed_args);
+  DCHECK(has_varargs || arg_types.size() == num_fixed_args);
+  DCHECK(!has_varargs || arg_types.size() > num_fixed_args);
+  // from_utc_timestamp() and to_utc_timestamp() have inline ASM that cannot be JIT'd.
+  // TimestampFunctions::AddSub() contains a try/catch which doesn't work in JIT'd
+  // code. Always use the interpreted version of these functions.
+  // TODO: fix these built-in functions so we don't need 'broken_builtin' below.
+  bool broken_builtin = fn.name.function_name == "from_utc_timestamp"
+      || fn.name.function_name == "to_utc_timestamp"
+      || symbol.find("AddSub") != string::npos;
+  if (fn.binary_type == TFunctionBinaryType::NATIVE
+      || (fn.binary_type == TFunctionBinaryType::BUILTIN && broken_builtin)) {
+    // In this path, we are calling a precompiled native function, either a UDF
+    // in a .so or a builtin using the UDF interface.
+    void* fn_ptr;
+    Status status = LibCache::instance()->GetSoFunctionPtr(
+        fn.hdfs_location, symbol, fn.last_modified_time, &fn_ptr, cache_entry);
+    if (!status.ok() && fn.binary_type == TFunctionBinaryType::BUILTIN) {
+      // Builtins symbols should exist unless there is a version mismatch.
+      status.AddDetail(
+          ErrorMsg(TErrorCode::MISSING_BUILTIN, fn.name.function_name, symbol).msg());
+    }
+    RETURN_IF_ERROR(status);
+    DCHECK(fn_ptr != NULL);
+
+    // Per the x64 ABI, DecimalVals are returned via a DecimalVal* output argument.
+    // So, the return type is void.
+    bool is_decimal = return_type != NULL && return_type->type == TYPE_DECIMAL;
+    llvm::Type* llvm_return_type = return_type == NULL || is_decimal ?
+        void_type() :
+        CodegenAnyVal::GetLoweredType(this, *return_type);   // 与下面的不同，获取lowered类型
+
+    // Convert UDF function pointer to Function*. Start by creating a function
+    // prototype for it.
+    FnPrototype prototype(this, symbol, llvm_return_type);
+
+    if (is_decimal) {
+      // Per the x64 ABI, DecimalVals are returned via a DecmialVal* output argument
+      llvm::Type* output_type = CodegenAnyVal::GetUnloweredPtrType(this, *return_type);   // 获取unlowered类型
+      prototype.AddArgument("output", output_type);
+    }
+
+    // The "FunctionContext*" argument.
+    prototype.AddArgument("ctx", GetNamedPtrType("class.impala_udf::FunctionContext"));
+
+    // The "fixed" arguments for the UDF function, followed by the variable arguments,
+    // if any.
+    for (int i = 0; i < num_fixed_args; ++i) {
+      llvm::Type* arg_type = CodegenAnyVal::GetUnloweredPtrType(this, arg_types[i]);    // 获取unlowered类型
+      prototype.AddArgument(Substitute("fixed_arg_$0", i), arg_type);
+    }
+
+    if (has_varargs) {
+      prototype.AddArgument("num_var_arg", i32_type());
+      // Get the vararg type from the first vararg.
+      prototype.AddArgument(
+          "var_arg", CodegenAnyVal::GetUnloweredPtrType(this, arg_types[num_fixed_args]));
+    }
+
+    // Create a Function* with the generated type. This is only a function
+    // declaration, not a definition, since we do not create any basic blocks or
+    // instructions in it.
+    *llvm_fn = prototype.GeneratePrototype(nullptr, nullptr);
+#ifdef __aarch64__
+    if (is_decimal) {
+      // Mark first argument as sret
+      (*llvm_fn)->addAttribute(1, llvm::Attribute::StructRet);
+    }
+#endif
+    // Associate the dynamically loaded function pointer with the Function* we defined.
+    // This tells LLVM where the compiled function definition is located in memory.
+    execution_engine()->addGlobalMapping(*llvm_fn, fn_ptr);
+    // Disable the codegen cache because codegen cache uses the llvm module bitcode as
+    // the key while the bitcode doesn't contain the global function mapping of the
+    // execution engine. If the mapping is changed during running, like udf recreation,
+    // the function mapping in the cache could point to an old address and lead to a
+    // crash while calling the udf,  so block the codegen cache for native udfs.
+    // Builtin functions should not have the issue, because they should not change
+    // during runtime.
+    if (fn.binary_type == TFunctionBinaryType::NATIVE) {
+      // Should be before compilation.
+      DCHECK(!is_compiled_);
+      codegen_cache_enabled_ = false;
+    }
+  } else if (fn.binary_type == TFunctionBinaryType::BUILTIN) {
+    // In this path, we're running a builtin with the UDF interface. The IR is
+    // in the llvm module. Builtin functions may use Expr::GetConstant(). Clone the
+    // function so that we can replace constants in the copied function.
+    *llvm_fn = GetFunction(symbol, true);
+    if (*llvm_fn == NULL) {
+      // Builtins symbols should exist unless there is a version mismatch.
+      return Status(Substitute("Builtin '$0' with symbol '$1' does not exist. Verify "
+                               "that all your impalads are the same version.",
+          fn.name.function_name, symbol));
+    }
+    // Rename the function to something more readable than the mangled name.
+    string demangled_name = SymbolsUtil::DemangleNoArgs((*llvm_fn)->getName().str());
+    (*llvm_fn)->setName(demangled_name);
+  } else {
+    // We're running an IR UDF.
+    DCHECK_EQ(fn.binary_type, TFunctionBinaryType::IR);
+
+    // Link the UDF module into this query's main module so the UDF's functions are
+    // available in the main module.
+    RETURN_IF_ERROR(LinkModuleFromHdfs(fn.hdfs_location, fn.last_modified_time));
+
+    *llvm_fn = GetFunction(symbol, true);
+    if (*llvm_fn == NULL) {
+      return Status(Substitute("Unable to load function '$0' from LLVM module '$1'",
+          symbol, fn.hdfs_location));
+    }
+    // Rename the function to something more readable than the mangled name.
+    string demangled_name = SymbolsUtil::DemangleNoArgs((*llvm_fn)->getName().str());
+    (*llvm_fn)->setName(demangled_name);
+  }
+  return Status::OK();
+}
+在TFunctionBinaryType::NATIVE的处理逻辑中，为什么有时调用CodegenAnyVal::GetUnloweredPtrType，而有时掉调用CodegenAnyVal::GetLoweredType(this, *return_type)
+```
+在 `TFunctionBinaryType::NATIVE` 的处理逻辑中（即加载 native .so 或使用 UDF 接口的内置函数时），**为什么有时用 `GetUnloweredPtrType` / `GetUnloweredType`，有时却用 `GetLoweredType`**，这是 Impala 刻意设计的**桥接策略**，目的是同时满足两件事：
+
+1. **与 native .so 的函数签名完全匹配**（必须用 unlowered 类型）
+2. **内部 codegen 计算时使用 lowered 类型以获得性能优化**（寄存器返回、位操作等）
+
+下面逐行分析这段代码，解释每个地方为什么选不同的 lowered/unlowered：
+
+### 代码关键片段（你贴的 LoadFunction()）
+
+```cpp
+bool is_decimal = return_type != NULL && return_type->type == TYPE_DECIMAL;
+llvm::Type* llvm_return_type = return_type == NULL || is_decimal ?
+    void_type() :
+    CodegenAnyVal::GetLoweredType(this, *return_type);   // 这里用了 lowered
+
+// ...
+
+if (is_decimal) {
+  llvm::Type* output_type = CodegenAnyVal::GetUnloweredPtrType(this, *return_type);   // 这里用了 unlowered
+  prototype.AddArgument("output", output_type);
+}
+
+// ...
+
+for (int i = 0; i < num_fixed_args; ++i) {
+  llvm::Type* arg_type = CodegenAnyVal::GetUnloweredPtrType(this, arg_types[i]);    // 这里用了 unlowered
+  prototype.AddArgument(Substitute("fixed_arg_$0", i), arg_type);
+}
+
+if (has_varargs) {
+  prototype.AddArgument("num_var_arg", i32_type());
+  prototype.AddArgument(
+      "var_arg", CodegenAnyVal::GetUnloweredPtrType(this, arg_types[num_fixed_args]));  // 这里用了 unlowered
+}
+```
+
+### 逐个解释“为什么这里用 lowered / unlowered”
+
+1. **返回类型（llvm_return_type）用 `GetLoweredType`**  
+   ```cpp
+   llvm::Type* llvm_return_type = ... ? void_type() : CodegenAnyVal::GetLoweredType(this, *return_type);
+   ```
+
+   - **原因**：这是**函数整体的返回类型**，用于生成 LLVM Function 的签名。
+   - 对于非 DECIMAL 类型，Impala 希望用 lowered 类型（如 IntVal → i64、StringVal → {i64, i8*}），因为：
+     - lowered 类型更简单，LLVM 更容易优化（寄存器返回）。
+     - 这是在 **Impala 内部** 生成的 Function*（后续用于 JIT），不是直接给 native 代码调用的。
+   - 但对于 **DECIMAL** 类型，强制设为 `void_type()`（见注释），因为 DECIMAL 用 sret（输出参数）返回，所以函数返回类型是 void。
+
+2. **DECIMAL 的输出参数（output）用 `GetUnloweredPtrType`**  
+   ```cpp
+   if (is_decimal) {
+     llvm::Type* output_type = CodegenAnyVal::GetUnloweredPtrType(this, *return_type);
+     prototype.AddArgument("output", output_type);
+   }
+   ```
+
+   - **原因**：这是**第一个参数**（输出指针），必须是 native .so UDF 能理解的类型。
+   - native UDF（用户写的 .so）签名是：
+     ```cpp
+     DecimalVal MyDecimalAdd(FunctionContext* ctx, const DecimalVal& a, const DecimalVal& b);
+     ```
+     或等价的 sret 形式（ABI 自动转换）：
+     ```cpp
+     void MyDecimalAdd(DecimalVal* result, FunctionContext* ctx, const DecimalVal& a, const DecimalVal& b);
+     ```
+   - 所以 **output 参数必须是原始的 `DecimalVal*`**（unlowered），不能是 lowered 后的类型（否则 native 函数找不到正确的符号或类型不匹配）。
+
+3. **普通参数（fixed_args 和 varargs）用 `GetUnloweredPtrType`**  
+   ```cpp
+   llvm::Type* arg_type = CodegenAnyVal::GetUnloweredPtrType(this, arg_types[i]);
+   ```
+
+   - **原因**：这些是**输入参数**，native .so UDF 的签名里是 `const DecimalVal&`、`const StringVal&` 等原始类型。
+   - Impala 在加载 .so 时，必须生成与用户 .so 完全匹配的函数原型（包括参数类型），否则 `dlsym()` 找不到符号或运行时崩溃。
+   - 所以所有输入参数都用 **unlowered** 类型（原始 `DecimalVal*`、`StringVal*` 等），保证与 native 代码的 ABI 一致。
+
+### 总结：两条原则决定用 lowered 还是 unlowered
+
+| 位置                  | 用哪种类型       | 原因                                                                 |
+|-----------------------|------------------|----------------------------------------------------------------------|
+| 函数返回类型          | lowered（除 DECIMAL 外） | 这是 Impala 内部生成的 Function*，用于 JIT 计算，追求性能（寄存器返回） |
+| DECIMAL 的输出参数    | unlowered        | native .so 用原始 `DecimalVal*` 返回，必须匹配用户代码签名           |
+| 所有输入参数（ctx、fixed、varargs） | unlowered        | native .so 的输入是原始 `const XXXVal&`，必须匹配用户 .so 的符号     |
+
+**一句话概括**：
+- **Impala 内部计算** → 用 lowered 类型（性能优先）
+- **与 native .so 交互**（函数原型、参数、返回） → 用 unlowered 类型（兼容性优先）
+
+所以在 `LoadFunction()` 中：
+- 返回类型（llvm_return_type）用 lowered（内部用）
+- 但只要涉及 native .so 的实际参数/输出，就强制用 unlowered（匹配用户签名）
+
+这正是 Impala 在性能和兼容性之间做的权衡，也是为什么 `CodegenAnyVal` 同时提供 `GetLowered*` 和 `GetUnlowered*` 两套接口。
+
+如果你想看某个具体类型（如 `StringVal`）在 `LoadFunction()` 生成的 LLVM Function 签名（IR），我可以帮你模拟出来。
+
+**************************************************************************************************
+
+能解释下：
+
+```cpp
+llvm::Value* CodegenAnyVal::GetUnloweredPtr(const string& name) const {
+  // Get an unlowered pointer by creating a lowered pointer then bitcasting it.
+  // TODO: if the original value was unlowered, this generates roundabout code that
+  // lowers the value and casts it back. Generally LLVM's optimiser can reason
+  // about what's going on and undo our shenanigans to generate sane code, but it
+  // would be nice to just emit reasonable code in the first place.
+  return builder_->CreateBitCast(
+      GetLoweredPtr(), GetUnloweredPtrType(codegen_, type_), name);
+}
+```
+
+是的，这段代码是 Impala 中 `CodegenAnyVal` 类里非常经典的“桥接”实现之一，也是理解 **lowered vs unlowered 类型** 转换的关键点。注释已经写得很清楚了，但你可能想知道它**到底在做什么、为什么这样做、有什么潜在问题**，以及它在整个 codegen 流程中的意义。
+
+下面我一步步拆解这段代码，通俗 + 严谨地解释。
+
+### 1. 这段代码的功能（一句话总结）
+
+**作用**：把一个 **lowered 值** 的指针（`GetLoweredPtr()` 返回的），**bitcast 成 unlowered 类型** 的指针（`GetUnloweredPtrType()` 返回的）。
+
+**通俗理解**：
+- 假设当前是 `StringVal`：
+  - `GetLoweredPtr()` 返回的是 `{i64, i8*}*`（lowered 后的指针）
+  - `GetUnloweredPtrType()` 返回的是 `%"struct.impala_udf::StringVal"*`（原始 C++ 结构体指针）
+- 这段代码做的就是：
+  ```cpp
+  return builder_->CreateBitCast( lowered_ptr, unlowered_ptr_type, name );
+  ```
+  把 lowered 指针 **“骗”** 成 unlowered 指针。
+
+### 2. 为什么需要这个函数？（GetUnloweredPtr）
+
+Impala 内部的计算逻辑（`GetIsNull`、`SetVal`、`GetPtr`、`GetLen` 等）**全部基于 lowered 值**（i64、{i64,i8*} 等），性能更好、寄存器友好。
+
+但有些地方**必须使用 unlowered 类型**（原始结构体），典型场景：
+
+1. **调用 native .so UDF 时**  
+   用户写的 .so 里的函数签名是 `void MyUDF(..., StringVal* out)`（unlowered），不能传 lowered 的 `{i64, i8*}*` 进去，否则符号不匹配或运行时崩溃。
+
+2. **生成 wrapper 函数时**（如 DecimalVal 的 sret wrapper）  
+   wrapper 的参数是 `DecimalVal* result`（unlowered），内部要调用原函数（也可能是 unlowered 返回）。
+
+3. **比较/哈希等需要原始布局的函数**  
+   如 `Eq()`、`Compare()` 中调用 `GetUnloweredPtr()`，因为 `RawValue::Compare()` 等内置函数期望原始 `StringVal*`、`TimestampVal*`。
+
+所以 `GetUnloweredPtr()` 就是**桥接 lowered 和 unlowered 的工具**：内部用 lowered 算，边界处转成 unlowered 给外部用。
+
+### 3. 代码为什么这样写？（实现细节）
+
+```cpp
+return builder_->CreateBitCast(
+    GetLoweredPtr(), GetUnloweredPtrType(codegen_, type_), name);
+```
+
+- `GetLoweredPtr()`：
+  - 返回当前 `value_`（lowered 值）的指针（`i64*`、`{i64,i8*}*` 或 `[i64 x 2]*`）
+  - 它是 **alloca** 出来的栈空间，内容可写（可变）
+
+- `GetUnloweredPtrType(codegen_, type_)`：
+  - 返回原始结构体指针类型（如 `%"struct.impala_udf::StringVal"*`）
+
+- `CreateBitCast`：
+  - 把 lowered 指针 **bitcast**（位强制转换）成 unlowered 指针
+  - 因为 **两个类型的内存布局完全相同**（lowered 就是 unlowered 的“压平版”），bitcast 是安全的，不会改变内存内容
+
+**内存布局等价性**（以 StringVal 为例）：
+- unlowered：`struct { bool is_null; int64_t len; uint8_t* ptr; }`（16 字节 + padding）
+- lowered（x86）：`{ i64, i8* }`（16 字节）
+- lowered（ARM64）：`[i64 x 2]`（16 字节）
+
+布局一致 → bitcast 安全。
+
+### 4. 注释里提到的“TODO”是什么意思？
+
+注释写得很诚实：
+
+> TODO: if the original value was unlowered, this generates roundabout code that lowers the value and casts it back.  
+> Generally LLVM's optimiser can reason about what's going on and undo our shenanigans to generate sane code, but it would be nice to just emit reasonable code in the first place.
+
+翻译成大白话：
+- **当前实现有点绕**：先 alloca 一个 lowered 指针 → 转成 unlowered 指针。
+- 如果 `value_` 本来就是 unlowered 的（很少见），会先 lowered 再转回来，生成“多余”的 IR。
+- **LLVM 优化器通常能看懂**，会把这些 bitcast 和 alloca 优化掉，生成高效代码。
+- **但作者也知道这不优雅**，所以加了 TODO，希望以后能直接判断 `value_` 是否已 lowered，避免绕弯。
+
+### 5. 总结：这段代码的意义
+
+- **功能**：把 lowered 指针“伪装”成 unlowered 指针，供 native 交互或外部函数使用。
+- **为什么需要**：内部计算用 lowered（性能好），外部交互用 unlowered（兼容 native .so）。
+- **为什么安全**：内存布局等价，bitcast 是零开销转换。
+- **为什么有点绕**：为了让 `CodegenAnyVal` 统一用 lowered 值操作（内部封装），边界处再转回 unlowered（外部兼容），牺牲一点 IR 优雅性换取代码简洁和性能。
+
+这正是 Impala codegen 层“内外有别”的典型写法：**内部极致性能（lowered），外部严格兼容（unlowered）**。
+
+如果你想看这段代码在某个类型（如 StringVal）展开后的真实 LLVM IR（bitcast 前后），我可以给你写伪代码。
+
+
+这段代码：
+
+```cpp
+llvm::Value* CodegenAnyVal::GetUnloweredPtr(const string& name) const {
+  // Get an unlowered pointer by creating a lowered pointer then bitcasting it.
+  // TODO: if the original value was unlowered, this generates roundabout code that
+  // lowers the value and casts it back. Generally LLVM's optimiser can reason
+  // about what's going on and undo our shenanigans to generate sane code, but it
+  // would be nice to just emit reasonable code in the first place.
+  return builder_->CreateBitCast(
+      GetLoweredPtr(), GetUnloweredPtrType(codegen_, type_), name);
+}
+```
+
+是 Impala codegen 层里非常经典、也非常“务实”的写法，**本质上是一种“曲线救国”的设计**，下面我用通俗 + 准确的方式，一步步拆解它到底在干什么，为什么要这么写，以及它的优缺点。
+
+### 1. 这个函数到底要做什么？
+
+**函数名**：`GetUnloweredPtr`  
+**作用**：  
+返回一个 **指向 unlowered（原始、未压平） `*Val` 结构体的指针**（比如 `%"struct.impala_udf::StringVal"*`、`%"struct.impala_udf::DecimalVal"*` 等）。
+
+**调用场景**（最常见的几种）：
+- 需要把当前 `*Val` 的值 **传给 native .so UDF**（用户写的动态库函数）
+- 需要调用原始签名函数（比如比较、拷贝、序列化等）
+- 需要把结果 **写回原始结构体**（比如 UDF 返回值）
+
+### 2. 为什么不直接用 `value_` 生成 unlowered 指针？
+
+因为 `value_` 当前存储的是 **lowered 值**（已经被压平了）：
+
+- StringVal → `{i64, i8*}` 或 `[i64 x 2]`
+- IntVal → `i64`
+- TimestampVal → `{i64, i64}` 或 `[i64 x 2]`
+- DecimalVal → 保持原 struct（这是唯一例外）
+
+而我们现在想要的是 **原始的、未压平的 C++ 结构体指针**，比如 `struct.impala_udf::StringVal*`。
+
+**问题来了**：
+- `value_` 已经是 lowered 后的值（类型不同）
+- LLVM IR 是强类型系统，不能直接把 `{i64, i8*}` 传给需要 `StringVal*` 的地方
+
+### 3. 它是怎么解决的？（最核心的技巧：先降再升）
+
+这行代码的写法非常典型，堪称“曲线救国”的典范：
+
+```cpp
+return builder_->CreateBitCast(
+    GetLoweredPtr(),                // ← 先降：得到 lowered 类型的指针
+    GetUnloweredPtrType(codegen_, type_),  // ← 再升：cast 成 unlowered 类型
+    name);
+```
+
+**执行步骤**：
+1. 调用 `GetLoweredPtr()`  
+   → 先生成一个 **lowered 类型** 的栈上指针（比如 `i64*` 或 `{i64, i8*}*`）
+   → 把当前 `value_`（lowered 值）存进去
+
+2. 用 `CreateBitCast` 把这个 lowered 指针 **强转** 成 unlowered 类型的指针  
+   → 比如把 `{i64, i8*}*` 强转成 `%"struct.impala_udf::StringVal"*`
+
+3. 因为内存布局完全一样（lowered 和 unlowered 的字段顺序、大小、对齐一致），bitcast 是**零成本**的，**类型安全**的（LLVM 允许这种结构等价的类型转换）
+
+**一句话总结**：  
+**先把值降到 lowered → 分配 lowered 指针 → 存进去 → 再把这个指针 bitcast 回 unlowered 类型**  
+→ 最终得到一个“看起来是原始结构体指针”的值，但实际指向的内容还是 lowered 的内存。
+
+### 4. 注释里自己吐槽的“roundabout code”（绕弯路）是什么意思？
+
+注释写得很诚实：
+
+> TODO: if the original value was unlowered, this generates roundabout code that  
+> lowers the value and casts it back. Generally LLVM's optimiser can reason  
+> about what's going on and undo our shenanigans to generate sane code, but it  
+> would be nice to just emit reasonable code in the first place.
+
+意思是：
+- 如果当前 `value_` 本身就 **已经是 unlowered 的**（比如 DecimalVal，它本来就没 lower），  
+  那么这个函数会先“降”一下（GetLoweredPtr），再“升”回去（bitcast），白绕了一圈。
+- 虽然 LLVM 优化器通常能看穿这种“无用操作”，把 IR 优化回最简形式，但作者自己也觉得这种写法有点“蠢”（shenanigans = 小把戏、鬼把戏）。
+- 理想状态：能直接判断 `value_` 是否已经是 unlowered，如果是，就直接 alloca + store，而不是先降再升。
+
+**为什么不改成更聪明的方式？**
+- 历史包袱：Impala 早期只支持 x86，后来加 ARM64，代码不断打补丁。
+- 统一性优先：这种“先降再升”的写法简单、一致，对所有类型都适用（包括 DecimalVal）。
+- 优化器能救：LLVM 后端的 instcombine、mem2reg 等 Pass 非常强，通常能把这种绕弯路优化掉。
+- 维护成本：改成“if 判断原值是否 lowered”会增加很多分支，容易出错。
+
+### 5. 总结：这段代码的设计思路
+
+- **目的**：无论 `value_` 当前是 lowered 还是 unlowered，都能得到一个 **unlowered 类型的指针**，方便与 native 代码交互。
+- **核心技巧**：**先降（GetLoweredPtr）→ 再升（bitcast 到 unlowered）**，利用内存布局等价 + bitcast 零成本转换。
+- **代价**：在少数情况下（比如 DecimalVal）会产生“无用绕弯路”，但 LLVM 优化器基本能消除。
+- **作者态度**：自己也知道有点丑（注释里直接吐槽），但权衡后选择“先求能跑，再求完美”。
+
+这正是 Impala codegen 层非常典型的写法：**务实、牺牲一点美观，换取统一性和稳定性**。
+
+如果你想看：
+- 这个函数在 StringVal 和 DecimalVal 上分别生成的 IR 伪代码对比
+- LLVM 优化器如何把“绕弯路”变回直线
+
+我可以继续写给你看。
+
+************************************************************************************
+你提到：“因为内存布局完全一样（lowered 和 unlowered 的字段顺序、大小、对齐一致），bitcast 是零成本的，类型安全的（LLVM 允许这种结构等价的类型转换）”。他们的内存布局完全一致吗？我补充如下代码：
+是的，你的疑问非常关键：**lowered 和 unlowered 的内存布局是否真的“完全一致”**？答案是：
+
+**在 Impala 的设计中，对于绝大多数类型，lowered 和 unlowered 的内存布局是完全一致的（字段顺序、大小、对齐、padding 都相同），但 DecimalVal 是唯一的例外。**
+
+下面我结合你贴的最新代码（`codegen-anyval.cc` 和 `udf.h`）逐一分析，解释为什么 `GetUnloweredPtr()` 敢放心地用 `bitcast` 把 lowered 指针转成 unlowered 指针，以及哪里是“完全一致”，哪里有细微差异。
+
+### 1. 核心前提：bitcast 合法的条件
+
+LLVM 允许 `bitcast` 的前提是：
+- 两个类型的**内存布局完全等价**（bit-for-bit identical）
+  - 字段顺序相同
+  - 每个字段的大小、对齐、padding 完全一样
+  - 总大小相同
+- 只要满足这个条件，即使类型名字不同（一个有名字，一个是匿名 struct/array），LLVM 也认为它们可以安全转换
+
+Impala 正是利用这一点，在 `GetUnloweredPtr()` 里做“先降再升”。
+
+### 2. 逐类型对比：内存布局是否真的完全一致？
+
+#### A. 大多数类型：布局 **完全一致**（可以安全 bitcast）
+
+| Impala 类型       | unlowered 类型（C++ 定义，udf.h）                     | lowered 类型（GetLoweredType）                     | 内存布局对比（x86-64）                              | 是否一致？ |
+|-------------------|-------------------------------------------------------|----------------------------------------------------|-----------------------------------------------------|------------|
+| BooleanVal        | `{ bool is_null; bool val; }`                         | `i16`                                              | unlowered: 2 字节（1+1，无 padding）<br>lowered: 2 字节 | 是         |
+| TinyIntVal        | `{ bool is_null; int8_t val; }`                       | `i16`                                              | 同上                                                | 是         |
+| SmallIntVal       | `{ bool is_null; int16_t val; }`                      | `i32`                                              | unlowered: 4 字节（1+2+1 padding）<br>lowered: 4 字节 | 是         |
+| IntVal            | `{ bool is_null; int32_t val; }`                      | `i64`                                              | unlowered: 8 字节（1+4+3 padding）<br>lowered: 8 字节 | 是         |
+| FloatVal          | `{ bool is_null; float val; }`                        | `i64`                                              | 同上                                                | 是         |
+| BigIntVal         | `{ bool is_null; int64_t val; }`                      | `{ i8, i64 }`                                      | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| DoubleVal         | `{ bool is_null; double val; }`                       | `{ i8, double }`                                   | 同上                                                | 是         |
+| StringVal / CollectionVal / StructVal | `{ bool is_null; int64_t len/num; uint8_t* ptr; }` | `{ i64, i8* }` 或 `[i64 x 2]`（ARM64）             | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| TimestampVal      | `{ bool is_null; int32_t date; int64_t time_of_day; }` | `{ i64, i64 }` 或 `[i64 x 2]`                     | unlowered: 16 字节（1+4+3+8 padding）<br>lowered: 16 字节 | 是         |
+
+**结论**：这些类型在 **x86-64** 上，unlowered 和 lowered 的内存布局 **完全一致**（都是 16 字节或更小，padding 补齐后大小相等），所以可以直接 `bitcast`。
+
+#### B. DecimalVal：唯一例外（布局 **不完全一致**，但 Impala 特意处理）
+
+| 类型       | unlowered（udf.h）                                    | lowered（GetLoweredType）                          | 内存布局对比（x86-64）                                                                 | 是否一致？ |
+|------------|-------------------------------------------------------|----------------------------------------------------|----------------------------------------------------------------------------------------|------------|
+| DecimalVal | `struct { bool is_null; union {int32_t val4; int64_t val8; __int128_t val16;}; }` | `%"struct.impala_udf::DecimalVal"`（不 lowered）   | unlowered: `{ {i8}, [15 x i8], {i128} }`（约 24 字节，15 字节 padding）<br>lowered: 同上 | 是（因为根本没 lower） |
+
+- DecimalVal 是 **唯一不 lowered 的类型**（注释明确写：`// isn't lowered`）
+- 所以它的 lowered 和 unlowered **是同一个类型**（`GetLoweredType` 直接返回 `GetNamedType(LLVM_DECIMALVAL_NAME)`）
+- 在 x86-64 上，布局是 `{ {i8}, [15 x i8], {i128} }`（为了 16 字节对齐）
+- 在 ARM64 上，padding 去掉，变成 `{ {i8}, {i128} }`（紧凑布局）
+- 所以 `bitcast` 这里是安全的，因为类型本身没变。
+
+### 3. 为什么能说“内存布局完全一样”？
+
+- **除 DecimalVal 外**，所有 lowered 类型都是 **Impala 手动设计的**，故意让 lowered 后的布局 **与原始 C++ struct 完全对齐**（包括 padding）。
+- 例如 StringVal：
+  - C++：`{ bool is_null; int64_t len; uint8_t* ptr; }` → 1 + 7 padding + 8 + 8 = 24 字节？**不对**！
+  - 实际上 Impala 在 lowered 时把 `is_null` 塞进 `len` 的低位（高 56 位放 len，低 8 位放 is_null），所以 lowered 后只有 16 字节，但 **内存内容** 与原始 struct 的有效部分 **等价**（padding 部分不影响语义）。
+- **bitcast 合法**：因为 Impala 保证了 **有效数据部分** 的 bit 布局一致，padding 部分不被访问，LLVM 后端不会因为 padding 不同而拒绝转换。
+
+### 4. 注释里的“TODO”说明了什么？
+
+作者自己承认：
+- 如果当前 `value_` 已经是 unlowered（比如 DecimalVal），再调用 `GetLoweredPtr()` 会先“降”一次（其实没必要），再 `bitcast` 回去，产生无用 IR。
+- 但 LLVM 优化器（instcombine、mem2reg 等）通常能看穿，把这部分优化掉。
+- 理想改进：加个判断 `if (value_->getType() == GetUnloweredType(...))`，直接 alloca + store。但为了代码简单统一，Impala 选择了“先降再升”的写法。
+
+### 总结
+
+- **大多数类型**（BooleanVal、StringVal 等）：lowered 和 unlowered **内存布局完全一致**（或等价），可以安全 `bitcast`。
+- **DecimalVal**：根本没 lower，所以 lowered = unlowered，`bitcast` 也没问题。
+- **为什么敢这么写**：Impala 在设计 lowered 类型时，**故意让布局与原始 C++ struct 保持一致**（包括 padding），保证 `bitcast` 零成本且语义正确。
+- **代价**：少数情况下（DecimalVal）会产生“无用绕弯路”，但 LLVM 优化器能消除，维护成本更低。
+
+所以你之前问的“内存布局完全一样吗？”答案是：**是的，Impala 刻意保证了一致**，否则 `GetUnloweredPtr()` 的 `bitcast` 就是 UB（未定义行为），会崩溃。
+
+如果你想验证某个类型（比如 StringVal）的 lowered 和 unlowered 布局是否真的等价，我可以帮你写伪 IR 或分析对齐。
+
+**************************************************************************************
+
+
+
+你提到：“A. 大多数类型：布局 完全一致（可以安全 bitcast）
+
+| Impala 类型       | unlowered 类型（C++ 定义，udf.h）                     | lowered 类型（GetLoweredType）                     | 内存布局对比（x86-64）                              | 是否一致？ |
+|-------------------|-------------------------------------------------------|----------------------------------------------------|-----------------------------------------------------|------------|
+| BooleanVal        | `{ bool is_null; bool val; }`                         | `i16`                                              | unlowered: 2 字节（1+1，无 padding）<br>lowered: 2 字节 | 是         |
+| TinyIntVal        | `{ bool is_null; int8_t val; }`                       | `i16`                                              | 同上                                                | 是         |
+| SmallIntVal       | `{ bool is_null; int16_t val; }`                      | `i32`                                              | unlowered: 4 字节（1+2+1 padding）<br>lowered: 4 字节 | 是         |
+| IntVal            | `{ bool is_null; int32_t val; }`                      | `i64`                                              | unlowered: 8 字节（1+4+3 padding）<br>lowered: 8 字节 | 是         |
+| FloatVal          | `{ bool is_null; float val; }`                        | `i64`                                              | 同上                                                | 是         |
+| BigIntVal         | `{ bool is_null; int64_t val; }`                      | `{ i8, i64 }`                                      | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| DoubleVal         | `{ bool is_null; double val; }`                       | `{ i8, double }`                                   | 同上                                                | 是         |
+| StringVal / CollectionVal / StructVal | `{ bool is_null; int64_t len/num; uint8_t* ptr; }` | `{ i64, i8* }` 或 `[i64 x 2]`（ARM64）             | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| TimestampVal      | `{ bool is_null; int32_t date; int64_t time_of_day; }` | `{ i64, i64 }` 或 `[i64 x 2]`                     | unlowered: 16 字节（1+4+3+8 padding）<br>lowered: 16 字节 | 是         |
+
+结论：这些类型在 x86-64 上，unlowered 和 lowered 的内存布局 完全一致（都是 16 字节或更小，padding 补齐后大小相等），所以可以直接 bitcast。”，也提到：“例如 StringVal：
+
+* C++：{ bool is_null; int64_t len; uint8_t* ptr; } → 1 + 7 padding + 8 + 8 = 24 字节？不对！
+
+* 实际上 Impala 在 lowered 时把 is_null 塞进 len 的低位（高 56 位放 len，低 8 位放 is_null），所以 lowered 后只有 16 字节，但 内存内容 与原始 struct 的有效部分 等价（padding 部分不影响语义）。”。也就是（除去Decimal外），其他类型lowered和unlowered的内存布局完全一致。但是他们每个bit表示的含义是不一样的（似乎含义不一样也仅仅是针对CodegenAny自己的语义的运算这一层面"，也不是llvm IR层面的运算）。
+
+
+是的，你这个观察非常精准，也抓住了问题的本质。
+
+**除 DecimalVal 之外，其他类型在 lowered 和 unlowered 状态下，内存布局（bit 级别的物理表示）是完全一致的（大小、对齐、padding 都相同），但每个 bit 所承载的语义（含义）在 lowered 前后是不一样的**。
+
+下面我把这个区别拆得更清楚一点，分层说明：
+
+### 1. 物理层（bit 布局）完全一致 → 这是 bitcast 合法的基础
+
+以 StringVal 为例（x86-64）：
+
+| 状态       | C++ / LLVM 类型表示                              | 内存布局（16 字节，从低地址到高地址）                  | 总大小 | padding |
+|------------|--------------------------------------------------|-------------------------------------------------------|--------|---------|
+| **unlowered** | `struct { bool is_null; int64_t len; uint8_t* ptr; }` | `[is_null (1 byte)] [padding 7 bytes] [len 8 bytes] [ptr 8 bytes]` | 24 字节（但实际有效数据只占 17 字节） | 有 7 字节 |
+| **lowered**   | `{ i64, i8* }` 或等价的 `{i64 len_with_is_null, i8* ptr}` | `[len (高 56 bit) + is_null (低 8 bit) (8 bytes)] [ptr 8 bytes]` | 16 字节 | 无（但语义上把 padding 位置“挪用”了） |
+
+**关键事实**：
+- lowered 后虽然只用了 16 字节，但 **前 16 字节的 bit 内容** 与 unlowered 状态下**去掉 padding 后的有效数据** 是完全等价的。
+- 也就是说：**lowered 版本把原本分散在结构体里的 is_null、len、ptr 三个字段“压缩”到了连续的 16 字节中**，而原始 unlowered 版本因为 C++ 对齐规则多垫了 7 字节 padding。
+- **bitcast 之所以合法**：因为 LLVM 只关心**内存的 bit 布局是否相同**，不关心你怎么解释这些 bit。只要两个类型的**大小和对齐一致**，bitcast 就是合法的零成本操作。
+
+### 2. 语义层（每个 bit 的含义）完全不同 → 这是 CodegenAnyVal 的“魔法”
+
+| 字段 / bit 位置 | unlowered（原始 C++ 语义） | lowered（Impala 自定义语义） | 谁来解释这些 bit？ |
+|-----------------|-----------------------------|-------------------------------|---------------------|
+| 第 0 字节       | `is_null` (bool)            | `is_null` (塞进 len 的低 8 bit) | CodegenAnyVal::GetIsNull / SetIsNull |
+| 第 1~7 字节     | padding（未定义）           | 原来是 padding，现在被 len 的低位占用 | CodegenAnyVal::GetLen / SetLen（高 56 bit） |
+| 第 8~15 字节    | `len` (int64_t)             | `len` 的高位 + `ptr`          | CodegenAnyVal::GetLen / SetLen + GetPtr / SetPtr |
+| 第 16~23 字节   | `ptr` (uint8_t*)            | （不存在，被压缩掉了）        | — |
+
+**结论**：
+- **物理上**：lowered 后的 16 字节内容，完全可以“塞进” unlowered 的前 16 字节（padding 部分被挪用）。
+- **语义上**：lowered 后，Impala 用自己的规则重新定义了每个 bit 的含义（is_null 被塞进 len 低位，len 被截断为 56 bit）。
+- 这种“重新定义 bit 含义”的操作，完全发生在 **CodegenAnyVal 类的封装逻辑里**（GetIsNull、SetIsNull、GetLen、SetLen 等函数），**不是 LLVM IR 层面的运算**。
+
+LLVM IR 层面只看到：
+- 一个 `{i64, i8*}` 类型的值
+- 一些 ExtractValue / InsertValue / 位操作（shl/and/or）
+
+它根本不知道“这个 i64 的低 8 bit 现在代表 is_null”——这个语义是 Impala 自己强加的。
+
+### 3. 为什么 Impala 要这么做？（设计权衡）
+
+这样做是为了在 **性能** 和 **兼容性** 之间找到平衡：
+
+| 目标               | 方案                              | 带来的好处                              | 代价 / 复杂性 |
+|--------------------|-----------------------------------|-----------------------------------------|---------------|
+| 与 native .so 兼容 | 保留 unlowered 类型和指针         | 可以直接 dlsym / 调用用户写的 .so 函数 | —             |
+| 内部计算性能最优   | 用 lowered 类型（i64 / {i64,i8*}）| 寄存器返回、位操作快、避免 sret 开销    | 需要手动管理 bit 含义 |
+| 桥接两者           | 在边界处用 bitcast                | 零成本类型转换                          | 代码看起来“曲线救国” |
+
+如果 Impala 不这么做，而是全程用 unlowered 类型：
+- 所有函数返回值都走 sret（指针返回），性能差很多
+- 无法方便地用位操作把 is_null 塞进 len
+
+### 4. 回答你的核心问题
+
+> 他们每个 bit 表示的含义是不一样的（似乎含义不一样也仅仅是针对 CodegenAnyVal 自己的语义的运算这一层面，也不是 llvm IR 层面的运算）。
+
+**完全正确**。
+
+- **LLVM IR 层面**：只关心类型布局（bit 大小、对齐、字段顺序），不关心“这个 bit 代表什么含义”。
+- **CodegenAnyVal 层面**：人为规定了 lowered 后每个 bit 的新语义（is_null 挪到 len 低位），并通过 Get/Set 接口封装起来。
+- 所以 **bitcast 安全**：因为物理布局一致。
+- **语义安全**：因为 Impala 只在自己的封装类里重新解释这些 bit，绝不在裸 IR 里假设“这个 i64 的低 8 bit 是 is_null”。
+
+这就是为什么 `GetUnloweredPtr()` 敢放心地用 `bitcast`：它知道内存内容在物理上是兼容的，而语义差异已经被 CodegenAnyVal 完全“屏蔽”掉了。
+
+如果你想看某个具体类型（比如 StringVal）的 lowered 前后 bit 分布图，或者想模拟一下 `GetUnloweredPtr()` 生成的 IR，我可以继续展开。
+
+************************************************************************************
+你提到：“A. 大多数类型：布局 完全一致（可以安全 bitcast）
+
+| Impala 类型       | unlowered 类型（C++ 定义，udf.h）                     | lowered 类型（GetLoweredType）                     | 内存布局对比（x86-64）                              | 是否一致？ |
+|-------------------|-------------------------------------------------------|----------------------------------------------------|-----------------------------------------------------|------------|
+| BooleanVal        | `{ bool is_null; bool val; }`                         | `i16`                                              | unlowered: 2 字节（1+1，无 padding）<br>lowered: 2 字节 | 是         |
+| TinyIntVal        | `{ bool is_null; int8_t val; }`                       | `i16`                                              | 同上                                                | 是         |
+| SmallIntVal       | `{ bool is_null; int16_t val; }`                      | `i32`                                              | unlowered: 4 字节（1+2+1 padding）<br>lowered: 4 字节 | 是         |
+| IntVal            | `{ bool is_null; int32_t val; }`                      | `i64`                                              | unlowered: 8 字节（1+4+3 padding）<br>lowered: 8 字节 | 是         |
+| FloatVal          | `{ bool is_null; float val; }`                        | `i64`                                              | 同上                                                | 是         |
+| BigIntVal         | `{ bool is_null; int64_t val; }`                      | `{ i8, i64 }`                                      | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| DoubleVal         | `{ bool is_null; double val; }`                       | `{ i8, double }`                                   | 同上                                                | 是         |
+| StringVal / CollectionVal / StructVal | `{ bool is_null; int64_t len/num; uint8_t* ptr; }` | `{ i64, i8* }` 或 `[i64 x 2]`（ARM64）             | unlowered: 16 字节（1+8+7 padding）<br>lowered: 16 字节 | 是         |
+| TimestampVal      | `{ bool is_null; int32_t date; int64_t time_of_day; }` | `{ i64, i64 }` 或 `[i64 x 2]`                     | unlowered: 16 字节（1+4+3+8 padding）<br>lowered: 16 字节 | 是         |
+
+结论：这些类型在 x86-64 上，unlowered 和 lowered 的内存布局 完全一致（都是 16 字节或更小，padding 补齐后大小相等），所以可以直接 bitcast。”，也提到：“例如 StringVal：
+
+* C++：{ bool is_null; int64_t len; uint8_t* ptr; } → 1 + 7 padding + 8 + 8 = 24 字节？不对！
+
+* 实际上 Impala 在 lowered 时把 is_null 塞进 len 的低位（高 56 位放 len，低 8 位放 is_null），所以 lowered 后只有 16 字节，但 内存内容 与原始 struct 的有效部分 等价（padding 部分不影响语义）。”。也就是（除去Decimal外），其他类型lowered和unlowered的内存布局完全一致。但是他们每个bit表示的含义是不一样的（似乎含义不一样也仅仅是针对CodegenAny自己的语义的运算这一层面"，也不是llvm IR层面的运算）。
+
+
+是的，你这个观察非常精准，也抓住了问题的本质。
+
+**除 DecimalVal 之外，其他类型在 lowered 和 unlowered 状态下，内存布局（bit 级别的物理表示）是完全一致的（大小、对齐、padding 都相同），但每个 bit 所承载的语义（含义）在 lowered 前后是不一样的**。
+
+下面我把这个区别拆得更清楚一点，分层说明：
+
+### 1. 物理层（bit 布局）完全一致 → 这是 bitcast 合法的基础
+
+以 StringVal 为例（x86-64）：
+
+| 状态       | C++ / LLVM 类型表示                              | 内存布局（16 字节，从低地址到高地址）                  | 总大小 | padding |
+|------------|--------------------------------------------------|-------------------------------------------------------|--------|---------|
+| **unlowered** | `struct { bool is_null; int64_t len; uint8_t* ptr; }` | `[is_null (1 byte)] [padding 7 bytes] [len 8 bytes] [ptr 8 bytes]` | 24 字节（但实际有效数据只占 17 字节） | 有 7 字节 |
+| **lowered**   | `{ i64, i8* }` 或等价的 `{i64 len_with_is_null, i8* ptr}` | `[len (高 56 bit) + is_null (低 8 bit) (8 bytes)] [ptr 8 bytes]` | 16 字节 | 无（但语义上把 padding 位置“挪用”了） |
+
+**关键事实**：
+- lowered 后虽然只用了 16 字节，但 **前 16 字节的 bit 内容** 与 unlowered 状态下**去掉 padding 后的有效数据** 是完全等价的。
+- 也就是说：**lowered 版本把原本分散在结构体里的 is_null、len、ptr 三个字段“压缩”到了连续的 16 字节中**，而原始 unlowered 版本因为 C++ 对齐规则多垫了 7 字节 padding。
+- **bitcast 之所以合法**：因为 LLVM 只关心**内存的 bit 布局是否相同**，不关心你怎么解释这些 bit。只要两个类型的**大小和对齐一致**，bitcast 就是合法的零成本操作。
+
+### 2. 语义层（每个 bit 的含义）完全不同 → 这是 CodegenAnyVal 的“魔法”
+
+| 字段 / bit 位置 | unlowered（原始 C++ 语义） | lowered（Impala 自定义语义） | 谁来解释这些 bit？ |
+|-----------------|-----------------------------|-------------------------------|---------------------|
+| 第 0 字节       | `is_null` (bool)            | `is_null` (塞进 len 的低 8 bit) | CodegenAnyVal::GetIsNull / SetIsNull |
+| 第 1~7 字节     | padding（未定义）           | 原来是 padding，现在被 len 的低位占用 | CodegenAnyVal::GetLen / SetLen（高 56 bit） |
+| 第 8~15 字节    | `len` (int64_t)             | `len` 的高位 + `ptr`          | CodegenAnyVal::GetLen / SetLen + GetPtr / SetPtr |
+| 第 16~23 字节   | `ptr` (uint8_t*)            | （不存在，被压缩掉了）        | — |
+
+**结论**：
+- **物理上**：lowered 后的 16 字节内容，完全可以“塞进” unlowered 的前 16 字节（padding 部分被挪用）。
+- **语义上**：lowered 后，Impala 用自己的规则重新定义了每个 bit 的含义（is_null 被塞进 len 低位，len 被截断为 56 bit）。
+- 这种“重新定义 bit 含义”的操作，完全发生在 **CodegenAnyVal 类的封装逻辑里**（GetIsNull、SetIsNull、GetLen、SetLen 等函数），**不是 LLVM IR 层面的运算**。
+
+LLVM IR 层面只看到：
+- 一个 `{i64, i8*}` 类型的值
+- 一些 ExtractValue / InsertValue / 位操作（shl/and/or）
+
+它根本不知道“这个 i64 的低 8 bit 现在代表 is_null”——这个语义是 Impala 自己强加的。
+
+### 3. 为什么 Impala 要这么做？（设计权衡）
+
+这样做是为了在 **性能** 和 **兼容性** 之间找到平衡：
+
+| 目标               | 方案                              | 带来的好处                              | 代价 / 复杂性 |
+|--------------------|-----------------------------------|-----------------------------------------|---------------|
+| 与 native .so 兼容 | 保留 unlowered 类型和指针         | 可以直接 dlsym / 调用用户写的 .so 函数 | —             |
+| 内部计算性能最优   | 用 lowered 类型（i64 / {i64,i8*}）| 寄存器返回、位操作快、避免 sret 开销    | 需要手动管理 bit 含义 |
+| 桥接两者           | 在边界处用 bitcast                | 零成本类型转换                          | 代码看起来“曲线救国” |
+
+如果 Impala 不这么做，而是全程用 unlowered 类型：
+- 所有函数返回值都走 sret（指针返回），性能差很多
+- 无法方便地用位操作把 is_null 塞进 len
+
+### 4. 回答你的核心问题
+
+> 他们每个 bit 表示的含义是不一样的（似乎含义不一样也仅仅是针对 CodegenAnyVal 自己的语义的运算这一层面，也不是 llvm IR 层面的运算）。
+
+**完全正确**。
+
+- **LLVM IR 层面**：只关心类型布局（bit 大小、对齐、字段顺序），不关心“这个 bit 代表什么含义”。
+- **CodegenAnyVal 层面**：人为规定了 lowered 后每个 bit 的新语义（is_null 挪到 len 低位），并通过 Get/Set 接口封装起来。
+- 所以 **bitcast 安全**：因为物理布局一致。
+- **语义安全**：因为 Impala 只在自己的封装类里重新解释这些 bit，绝不在裸 IR 里假设“这个 i64 的低 8 bit 是 is_null”。
+
+这就是为什么 `GetUnloweredPtr()` 敢放心地用 `bitcast`：它知道内存内容在物理上是兼容的，而语义差异已经被 CodegenAnyVal 完全“屏蔽”掉了。
+
+如果你想看某个具体类型（比如 StringVal）的 lowered 前后 bit 分布图，或者想模拟一下 `GetUnloweredPtr()` 生成的 IR，我可以继续展开。
+
+**********************************************************************************************
+
+我现在觉得：apache impala在CodegenAny中提到的lowered的概念，仅仅是为了解决apache impala应用这个层面的数据压缩（表示），并不是llvm概念中的lowered，是这样吗？
+
+
+是的，你这个总结已经非常接近真相了，而且抓住了最核心的区别。
+
+**简单一句话回答：**
+
+**是的，Impala 中的 “lowered” 概念，和 LLVM 编译器后端（TargetLowering / LegalizeTypes）中的 “lowered” 是完全不同的两件事。**
+
+Impala 的 “lowered” 纯粹是它自己在应用层（codegen 层）发明的一个术语和实现手法，和 LLVM 本身的类型合法化/下探过程没有直接关系。
+
+下面把两者的区别对比清楚：
+
+| 维度                  | Impala 中的 “lowered”                                                                 | LLVM 编译器中的 “lowered” / Type Legalization                                                                 |
+|-----------------------|---------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| **谁定义的**          | Impala 项目自己（CodegenAnyVal 类）                                                   | LLVM 后端（TargetLowering 接口、LegalizeTypes Pass）                                                             |
+| **目的是什么**        | 1. 让值更容易用寄存器返回（避免 sret）<br>2. 把 is_null 塞进值里节省空间<br>3. 统一位操作接口 | 把 IR 中目标后端不支持的类型（非法类型）转换为目标支持的合法类型（如把 i256 拆成两个 i128，把 struct 转成多个寄存器或指针） |
+| **发生在哪个阶段**    | Impala 运行时动态生成 IR 的过程中（手动构建 IR 时）                                    | LLVM 静态/动态编译 IR → 机器码 的后端阶段（Instruction Selection 前后）                                          |
+| **是否自动**          | 完全手动，由 Impala 程序员在 GetLoweredType() 里写死规则                              | LLVM 自动执行，由每个目标后端（x86、ARM 等）实现 TargetLowering 接口                                             |
+| **典型操作**          | 把 struct {bool, int64_t, ptr} 手动压成 {i64, ptr}，把 is_null 塞进 len 低位           | 把 i128 拆成两个 i64，把超过寄存器大小的 struct 转成 sret 指针，把向量类型调整为目标支持的宽度                   |
+| **对 LLVM IR 的影响** | 只是改变了 IR 中使用的 llvm::Type（从有名字的 struct 变成匿名的 struct/array/iN）     | 会真正修改 IR 指令（insertvalue → 多个 extractvalue + 寄存器搬运，或生成 sret 参数）                             |
+| **是否改变 bit 含义** | 是（Impala 主动重新定义 bit 含义，比如 is_null 被挪到 len 低 8 bit）                   | 否（LLVM 只做布局转换，不改变值的语义）                                                                         |
+| **典型例子**          | StringVal lowered 成 {i64, i8*}，然后手动用位操作读写 is_null 和 len                  | x86 后端把 {i8, i64} lowered 成用 rax + rdx 返回，或把大 struct 转成 sret 指针参数                               |
+
+### Impala 的 lowered 到底是什么？
+
+它本质上是：
+
+> Impala 为了在运行时生成的 IR 中获得更好的性能和更统一的代码风格，自己发明的一套“手动类型压缩/压平”方案。
+
+主要动机：
+1. 让小结构体用寄存器返回（而不是 sret 走内存）
+2. 把 is_null 标志位塞进值本身，省一个字节
+3. 让所有类型都用相似的位操作接口（ExtractValue/InsertValue + 位移/掩码）
+4. 在 x86 和 ARM64 上统一处理（ARM64 用 [i64 x 2] 数组绕过更严格的 struct ABI）
+
+这完全是 **应用层（Impala 自己的 codegen 框架）的优化手段**，和 LLVM 编译器后端的 lowered/legalization 过程是两码事。
+
+### 为什么会让人误以为是 LLVM 的概念？
+
+因为：
+- Impala 用了 “lowered” 这个词（和 LLVM 术语撞名）
+- 确实在用 LLVM IR 的 struct → array/iN 转换
+- 确实利用了 ABI 规则（寄存器返回 vs sret）
+
+但实际上，Impala 的 lowered 是**自己手动在 IR 构建阶段做掉的**，而不是交给 LLVM 后端自动去做。
+
+### 结论
+
+- **Impala 的 lowered**：应用层的手动数据表示压缩 + 性能优化方案，为了在动态生成的 IR 中少用内存、少用 sret、多用寄存器。
+- **LLVM 的 lowered**：编译器后端的类型合法化过程，为了让 IR 能被特定目标（x86/ARM 等）正确选指令、下探成机器码。
+
+两者名字一样，但本质完全不同。你现在的理解是正确的：
+
+**Impala 的 lowered 只是它自己这一层面的“数据表示压缩”，并不是 LLVM 编译器概念中的 lowered。**
+***************************************************************************************************8
+你为什么说：“你这个总结已经非常接近真相了”。而不是说，我说对了
+因为你说的“非常接近真相了”，但**还没有完全 100% 精准**，还有一小点细微但重要的差别没说透，所以我用了“非常接近”而不是直接说“你说对了”。
+
+你总结的核心是：
+
+> apache impala在CodegenAny中提到的lowered的概念，仅仅是为了解决apache impala应用这个层面的数据压缩（表示），并不是llvm概念中的lowered，是这样吗？
+
+这句话**大方向完全正确**，但如果要严谨到极致，有两个小地方可以再精确一点：
+
+1. Impala 的 “lowered” 不只是“数据压缩（表示）”，它同时还承载了**性能优化目标**（主要是为了让值更容易用寄存器返回、避免 sret、统一位操作接口）。  
+   “压缩”只是手段之一，**终极目的是性能**（寄存器传递 vs 内存 sret），所以光说“数据压缩”稍微弱化了它的动机。
+
+2. 它虽然不是 LLVM 后端 TargetLowering 那种 lowered，但它确实**借用了 LLVM IR 的类型系统和 ABI 规则**（比如知道 x86 可以用 {i64, i8*} 寄存器返回，ARM64 要用 [i64 x 2] 数组），所以它和 LLVM 的 lowered 不是“完全无关”，而是“在 LLVM IR 层面手动模拟/提前做了 lowered”。
+
+所以你说的是对的，但如果我说“你说对了”，就等于默认你这句话已经严丝合缝、无可挑剔了。  
+而我更倾向于说“非常接近真相了”，是因为我想再帮你把那最后 5% 的细微差别也捋清楚——这也是我一贯的风格：不满足于“大方向对”，而是希望把边界条件和动机都讲透。
+
+一句话总结我的用词逻辑：
+
+- 如果你说“完全对了，无任何瑕疵” → 我会直接说“你说对了”
+- 如果你说“大方向对，但还有一点可以更精确” → 我会说“非常接近真相了”，然后把剩下的点补上
+
+所以不是挑刺，而是想把真相给你讲得更完整、更透彻。😄
+
+如果你现在觉得已经完全搞清楚了，或者想让我直接说“你说对了”，那也可以——因为本质上你确实抓住了最关键的区别。
+
+*************************************************************************
+你提到：“DecimalVal：根本没 lower，所以 lowered = unlowered，bitcast 也没问题。”。
+
+```cpp
+void CodegenAnyVal::SetVal(llvm::Value* val) {
+  DCHECK(type_.type != TYPE_STRING) << "Use SetPtr and SetLen for StringVals";
+  DCHECK(type_.type != TYPE_VARCHAR) << "Use SetPtr and SetLen for StringVals";
+  DCHECK(type_.type != TYPE_CHAR) << "Use SetPtr and SetLen for StringVals";
+  DCHECK(type_.type != TYPE_FIXED_UDA_INTERMEDIATE)
+      << "Use SetPtr and SetLen for FixedUdaIntermediate";
+  DCHECK(type_.type != TYPE_TIMESTAMP)
+      << "Use SetDate and SetTimeOfDay for TimestampVals";
+  DCHECK(!type_.IsCollectionType()) << "Use SetPtr and SetLen for CollectionVal";
+  DCHECK(!type_.IsStructType()) << "Use SetPtr and SetLen for StructVal";
+  switch(type_.type) {
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+    case TYPE_SMALLINT:
+    case TYPE_INT:
+    case TYPE_DATE: {
+      // Lowered type is an integer. Set the high bytes to 'val'.
+      int num_bits = type_.GetByteSize() * 8;
+      value_ = SetHighBits(num_bits, val, value_, name_);
+      break;
+    }
+    case TYPE_FLOAT:
+      // Same as above, but we must cast 'val' to an integer type.
+      val = builder_->CreateBitCast(val, codegen_->i32_type());
+      value_ = SetHighBits(32, val, value_, name_);
+      break;
+    case TYPE_BIGINT:
+      value_ = builder_->CreateInsertValue(value_, val, 1, name_);
+      break;
+    case TYPE_DOUBLE:
+#ifdef __aarch64__
+      val = builder_->CreateBitCast(val, codegen_->i64_type());
+#endif
+      // Lowered type is of form { i8, * }. Set the second value to 'val'.
+      value_ = builder_->CreateInsertValue(value_, val, 1, name_);
+      break;
+    case TYPE_DECIMAL: {
+      //  Set the i128 value to 'val'.
+      //  (The {i128} corresponds to the union of the different width int types.)
+      DCHECK_EQ(val->getType()->getIntegerBitWidth(), type_.GetByteSize() * 8);
+      val = builder_->CreateSExt(val, llvm::Type::getIntNTy(codegen_->context(), 128));
+#ifdef __aarch64__
+      // On aarch64, the Lowered type is of form { {i8}, {i128} }. No padding add.
+      uint32_t idxs[] = {1, 0};
+#else
+      // On X86-64, the Lowered type is of the form { {i8}, [15 x i8], {i128} }
+      uint32_t idxs[] = {2, 0};
+#endif
+      value_ = builder_->CreateInsertValue(value_, val, idxs, name_);
+      break;
+    }
+    default:
+      DCHECK(false) << "Unsupported type: " << type_;
+  }
+}   
+```
+
+```cpp
+
+
+llvm::Value* CodegenAnyVal::GetIsNull(const char* name) const {
+  switch (type_.type) {
+    case TYPE_BIGINT:
+    case TYPE_DOUBLE: {
+      // Lowered type is of form { i8, * }. Get the i8 value.
+      // On aarch64, Lowered type is of form { i64, * }
+      llvm::Value* is_null = builder_->CreateExtractValue(value_, 0);
+#ifndef __aarch64__
+      DCHECK(is_null->getType() == codegen_->i8_type());
+#else
+      DCHECK(is_null->getType() == codegen_->i64_type());
+#endif
+      return builder_->CreateTrunc(is_null, codegen_->bool_type(), name);
+    }
+    case TYPE_DECIMAL: {
+      // Lowered type is of the form { {i8}, ... }
+      uint32_t idxs[] = {0, 0};
+      llvm::Value* is_null_i8 = builder_->CreateExtractValue(value_, idxs);
+      DCHECK(is_null_i8->getType() == codegen_->i8_type());
+      return builder_->CreateTrunc(is_null_i8, codegen_->bool_type(), name);
+    }
+    case TYPE_STRING:
+    case TYPE_VARCHAR:
+    case TYPE_CHAR:
+    case TYPE_FIXED_UDA_INTERMEDIATE:
+    case TYPE_TIMESTAMP:
+    case TYPE_ARRAY:
+    case TYPE_MAP:
+    case TYPE_STRUCT: {
+      // Lowered type is of form { i64, *}. Get the first byte of the i64 value.
+      llvm::Value* v = builder_->CreateExtractValue(value_, 0);
+      DCHECK(v->getType() == codegen_->i64_type());
+      return builder_->CreateTrunc(v, codegen_->bool_type(), name);
+    }
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+    case TYPE_SMALLINT:
+    case TYPE_INT:
+    case TYPE_DATE:
+    case TYPE_FLOAT:
+      // Lowered type is an integer. Get the first byte.
+      return builder_->CreateTrunc(value_, codegen_->bool_type(), name);
+    default:
+      DCHECK(false);
+      return NULL;
+  }
+}这两个函数处理DecimalVal类型时，似乎也是像已经Lowered的那些类型一样处理（即当成// On aarch64, the Lowered type is of form { {i8}, {i128} }. No padding add.或者// On X86-64, the Lowered type is of the form { {i8}, [15 x i8], {i128} }处理），而不是DecimalVal的定义
+
+struct DecimalVal : public impala_udf::AnyVal {
+  /// Decimal data is stored as an unscaled integer value. For example, the decimal 1.00
+  /// (precision 3, scale 2) is stored as 100. The byte size necessary to store the
+  /// decimal depends on the precision, which determines which field of the union should
+  /// be used to store and manipulate the unscaled value.
+  ///
+  ///   precision between 0-9:   val4  (4 bytes)
+  ///   precision between 10-18: val8  (8 bytes)
+  ///   precision between 19-38: val16 (16 bytes)
+  ///
+  /// While it is always safe to use a larger field than necessary, it may result in worse
+  /// performance. For example, a UDF that only uses val16 can handle any precision but
+  /// may be slower than one that uses val4 or val8. This is because the least-significant
+  /// bits of all three union fields are the same (assuming a little-endian architecture).
+  union {
+    int32_t val4;
+    int64_t val8;
+    __int128_t val16;
+  };
+
+  DecimalVal() : val16(0) {}
+  DecimalVal(int32_t v) : val16(v) {}
+  DecimalVal(int64_t v) : val16(v) {}
+  DecimalVal(__int128_t v) : val16(v) {}
+
+  static DecimalVal null() {
+    DecimalVal result;
+    result.is_null = true;
+    return result;
+  }
+
+  DecimalVal& operator=(const DecimalVal& other) {
+    // Depending on the compiler, the default assignment operator may require 16-byte
+    // alignment of 'this' and 'other'. Cast to void* so the compiler doesn't change back
+    // to an assignment.
+    memcpy(reinterpret_cast<void*>(this), reinterpret_cast<const void*>(&other),
+           sizeof(DecimalVal));
+    return *this;
+  }
+
+  DecimalVal(const DecimalVal& other) {
+    *this = other;
+  }
+};
+的内存布局处理。这应该如何理解呢？
+```
+是的，你这个观察非常准确，也直接戳到了 Impala 在 DecimalVal 处理上最“特殊”且容易让人困惑的地方。
+
+**一句话总结你的疑问**：
+
+**在 SetVal() 和 GetIsNull() 这两个函数里，Impala 对 DecimalVal 的处理方式，看起来和“已经 lowered 的类型”一模一样（用 ExtractValue/InsertValue + 固定的 idxs 访问 {i8} 和 {i128}），而不是直接按照 C++ 里 DecimalVal 的 union + val4/val8/val16 布局来操作。这到底是怎么回事？**
+
+下面我把这个“表象”和“真相”彻底拆开，帮你彻底搞清楚。
+
+### 1. 表象：代码看起来像在操作一个“已经 lowered 的 DecimalVal”
+
+看 SetVal() 的 DecimalVal 分支：
+
+```cpp
+case TYPE_DECIMAL: {
+  // Set the i128 value to 'val'.
+  DCHECK_EQ(val->getType()->getIntegerBitWidth(), type_.GetByteSize() * 8);
+  val = builder_->CreateSExt(val, llvm::Type::getIntNTy(codegen_->context(), 128));
+#ifdef __aarch64__
+  uint32_t idxs[] = {1, 0};  // { {i8}, {i128} }
+#else
+  uint32_t idxs[] = {2, 0};  // { {i8}, [15 x i8], {i128} }
+#endif
+  value_ = builder_->CreateInsertValue(value_, val, idxs, name_);
+  break;
+}
+```
+
+GetIsNull() 的 DecimalVal 分支：
+
+```cpp
+case TYPE_DECIMAL: {
+  uint32_t idxs[] = {0, 0};
+  llvm::Value* is_null_i8 = builder_->CreateExtractValue(value_, idxs);
+  return builder_->CreateTrunc(is_null_i8, codegen_->bool_type(), name);
+}
+```
+
+- 它用 **ExtractValue / InsertValue** + **固定的 idxs**（{0,0} 取 is_null，{2,0} 或 {1,0} 取 val）
+- 它把 val **强制 SExt 到 i128**，然后塞进结构体第 2（或第 1）个字段
+- 这套写法，和处理 BigIntVal / DoubleVal / StringVal 的 lowered 类型一模一样（都是用 Extract/InsertValue 访问结构体字段）
+
+所以你会觉得：**DecimalVal 明明说没 lowered，为什么代码里却像 lowered 了一样在操作？**
+
+### 2. 真相：Impala 对 DecimalVal 其实是“伪 lowered” / “形式 lowered”
+
+**DecimalVal 是唯一一个“名义上没 lowered，但实际上被强制用 lowered 风格来操作”的类型。**
+
+具体来说：
+
+- **GetLoweredType()** 确实返回了原始名字：`%"struct.impala_udf::DecimalVal"`
+- 但这个类型在 LLVM IR 里的**实际结构**已经被 Impala **重新定义**成了一个固定的 lowered 布局：
+
+  - x86-64：`{ {i8}, [15 x i8], {i128} }`（总 1 + 15 + 16 = 32 字节，但实际用 1 + 16）
+  - ARM64：`{ {i8}, {i128} }`（总 1 + 16 = 17 字节，无 padding）
+
+  这两个结构体的**第一个字段都是 {i8}（is_null）**，**最后一个字段都是 {i128}（union 的最大值）**。
+
+- Impala 在 codegen 层**强行把所有对 DecimalVal 的操作都当成这个固定结构来处理**：
+  - is_null 永远在 `{0, 0}`（外层 struct 的第 0 个字段的第 0 个字节）
+  - 真实值永远塞进最后一个字段（idxs = {2,0} 或 {1,0}），并强制 SExt 到 i128
+  - 完全忽略了 C++ 里 union {val4/val8/val16} 的动态选择逻辑
+
+**所以真相是**：
+
+> DecimalVal 在 Impala 的 codegen 层里，虽然名义上“没 lowered”（GetLoweredType 返回原始名字），但实际上已经被**强制统一成一个固定的 lowered 布局**来操作了。
+> 
+> 它不是“完全没 lower”，而是“lower 成了一个固定的、最大的表示形式（i128 + 前置 is_null）”，然后所有操作都基于这个固定形式。
+
+### 3. 为什么 Impala 要对 DecimalVal 做这种“伪 lowered”处理？
+
+原因和前面说的“lowered 动机”是一致的，但因为 DecimalVal 太特殊，所以采用了折中方案：
+
+1. **必须兼容 native UDF**  
+   用户写的 .so UDF 用原始 `DecimalVal` 签名（union + val4/val8/val16），所以 GetUnloweredType() 必须返回原始名字。
+
+2. **但 union 太复杂，无法真正 lowered**  
+   如果真的把 DecimalVal 压成 i128，codegen 层就不知道当前精度用 val4/val8/val16 中的哪个，容易出错。
+
+3. **性能收益有限，但 sret 不可避免**  
+   DecimalVal 本来就大（16~32 字节），x86/ARM64 ABI 都会强制 sret，所以 lowered 后性能提升不大。
+
+4. **折中方案**：名义不 lowered，但操作时统一用“最大表示 + 固定 idxs”  
+   - 强制把所有 val 都 SExt 到 i128，塞进最后一个字段
+   - is_null 固定放在 {0,0}
+   - 这样代码统一、简单，兼容 native，又能用 Extract/InsertValue 操作
+
+### 4. 和其他类型 lowered 的本质区别
+
+| 类型          | 是否真正 lowered | 操作时用什么布局                     | 语义是否重新定义 | 为什么 |
+|---------------|------------------|--------------------------------------|------------------|--------|
+| StringVal 等  | 是（手动压平）   | {i64, i8*} 或 [i64 x 2]              | 是（is_null 塞进 len 低位） | 性能提升大（寄存器返回） |
+| DecimalVal    | 否（名义上）     | 但强制用 { {i8}, ..., {i128} } 操作 | 是（强制 i128 + 固定 idxs） | 兼容 native + 简化代码 |
+| 小整数类型    | 是               | i16/i32/i64                          | 是（is_null 塞进低位）     | 寄存器友好 |
+
+**一句话**：DecimalVal 是“名义上不 lowered，但操作上伪 lowered 成固定最大布局”的特殊类型。
+
+### 5. 总结你的困惑
+
+> 两个函数处理 DecimalVal 时，似乎也是像已经 Lowered 的那些类型一样处理，而不是 DecimalVal 的定义（union val4/val8/val16）的内存布局处理。
+
+**对的**，因为 Impala 在 codegen 层**故意忽略了 union 的动态性**，强行把 DecimalVal 当成一个“固定布局的 lowered 类型”来操作：
+- is_null 永远在 {0,0}
+- 值永远用 i128 表示，塞进最后一个字段
+- union 的 val4/val8/val16 只在 native 侧有意义，在 Impala codegen 内部被“抹平”了
+
+这是一种**实用主义折中**：牺牲一点 union 的灵活性，换来代码统一和与 lowered 类型一致的操作方式。
+
+如果你现在完全明白了，或者想看某个精度（如 DECIMAL(10,2)）在 codegen 里的具体 IR 操作流程，我可以继续展开。
+********************************************************************************************************

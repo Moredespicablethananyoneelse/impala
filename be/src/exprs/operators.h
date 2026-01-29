@@ -36,7 +36,7 @@ using impala_udf::TimestampVal;
 using impala_udf::StringVal;
 using impala_udf::DecimalVal;
 
-/// Operators written against the UDF interface.
+/// Operators written against the UDF interface.针对 UDF 接口编写的运算符。
 class Operators {
  public:
   static TinyIntVal Bitnot_TinyIntVal(FunctionContext*, const TinyIntVal&);
